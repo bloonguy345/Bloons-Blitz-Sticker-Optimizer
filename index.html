@@ -28,9 +28,7 @@
   .seg button:first-child { border-radius:5px 0 0 5px; } .seg button:last-child { border-radius:0 5px 5px 0; }
   .grid { display:grid; gap:2px; width:max-content; margin:4px 0; }
   .cell { border:0; padding:0; border-radius:3px; display:flex; align-items:center; justify-content:center; font-weight:700; color:#111; }
-  .cell.off { background:#3a3f4b; } .cell.shape { background:#3a3f4b; } .cell.shape.on { background:var(--accent); }
-  .cell.avail { background:#58c36b; } .cell.blocked { background:#23262e; } .cell.empty { background:#b9bdc7; }
-  .counter { display:flex; align-items:center; gap:4px; } .counter button { padding:1px 8px; }
+  .cell.avail { background:#58c36b; } .cell.blocked { background:#23262e; }
   .sol { display:block; width:100%; text-align:left; margin:4px 0; padding:8px; white-space:pre-line; }
   .sol.sel { border-color:var(--accent); background:#243247; }
   .legend { display:flex; align-items:flex-start; gap:8px; margin:5px 0; }
@@ -38,20 +36,19 @@
   #status { margin:4px 0 8px; color:var(--dim); }
   #list { max-height:260px; overflow:auto; }
   label.chk { display:flex; gap:6px; align-items:center; margin:4px 0; }
+  ul.fx { margin:4px 0; padding-left:18px; }
 </style>
 </head>
 <body>
 <div id="app">
   <section>
-    <h2>1. Stat effects</h2>
-    <div id="stats"></div>
     <h2>2. Create sticker</h2>
     <div id="form"></div>
   </section>
   <section>
     <h2>3. Sticker Sheet<br><small>(green = sticker placement allowed)</small></h2>
     <div id="sheet"></div>
-    <h2>4. Stickers <small>(copies to place)</small></h2>
+    <h2>4. STICKERS (SELECT STICKERS TO PLACE)</h2>
     <div id="stickers"></div>
     <div id="opts"></div>
   </section>
@@ -65,14 +62,14 @@
 <!-- ================= SOLVER (also runs in a Web Worker, and under Node for testing) ================= -->
 <script id="solver" type="text/plain">
 function solve(input) {
-  var N = 6, EPS = 1e-4;
+  var N = 6, H = 5, EPS = 1e-4;
   var stats = input.stats, stickers = input.stickers, sheet = input.sheet;
   var requireAll = !!input.requireAll;
   var maxNodes = input.maxNodes || 20000000, maxSolutions = input.maxSolutions || 300;
   var S = stats.length, idx = {};
   stats.forEach(function (s, i) { idx[s.name] = i; });
   var avail = 0;
-  for (var i = 0; i < N * N; i++) if (sheet[i]) avail |= 1 << i;
+  for (var i = 0; i < N * H; i++) if (sheet[i]) avail |= 1 << i;
 
   function popcount(v) { var c = 0; while (v) { v &= v - 1; c++; } return c; }
 
@@ -87,7 +84,7 @@ function solve(input) {
         var ok = dy === 0 || (dx === 0 && rarity >= 2) || (diag && rarity === 3);
         if (!ok) continue;
         var nx = x + dx, ny = y + dy;
-        if (nx < 0 || ny < 0 || nx >= N || ny >= N) continue;
+        if (nx < 0 || ny < 0 || nx >= N || ny >= H) continue;
         range |= 1 << (ny * N + nx);
       }
     });
@@ -111,7 +108,7 @@ function solve(input) {
     orients.forEach(function (o) {
       var w = Math.max.apply(null, o.map(function (c) { return c[0]; })) + 1;
       var h = Math.max.apply(null, o.map(function (c) { return c[1]; })) + 1;
-      for (var oy = 0; oy + h <= N; oy++) for (var ox = 0; ox + w <= N; ox++) {
+      for (var oy = 0; oy + h <= H; oy++) for (var ox = 0; ox + w <= N; ox++) {
         var mask = 0, cells = [];
         o.forEach(function (c) { var bi = (c[1] + oy) * N + (c[0] + ox); cells.push(bi); mask |= 1 << bi; });
         if ((mask & avail) !== mask) continue;
@@ -280,6 +277,8 @@ function solve(input) {
     dfs2(0, occ, stack[0]);
   }
 
+  // Glow Ups are always placed first (before any other sticker), and the
+  // "place it" branches are explored before the "skip it" branch.
   function lampDfs(i, occ) {
     if (halt()) return;
     if (i === L) { stage2(occ); return; }
@@ -309,100 +308,96 @@ function solve(input) {
   var $ = function (id) { return document.getElementById(id); };
   var SRC = $('solver').textContent;
   var solveFn = new Function(SRC + '\nreturn solve;')();
-  var RAR = ['Common', 'Rare', 'Epic'], KEY = 'stickersheetV2';
-  var SORTS = ['Highest Stats', 'Balance', 'Highest Rarity'];
+  var RAR = ['Common', 'Rare', 'Epic'], KEY = 'stickersheetV3';
+  var SORTS = ['Overall Best', 'Highest Stats', 'Balance', 'Highest Rarity'];
 
   var COMMON_STATS = [
     'Hero Damage', 'Hero Pierce', 'Hero Attack Speed', 'Blop Value',
     'Hero Crit Chance', 'Collection Range', 'Hero Knockback', 'Luck',
-    'More Gold', 'Immunity Duration', 'Evasion', 'Encounter Duration'
+    'More Gold', 'Immunity Duration', 'Evasion', 'Encounter Duration', 'Effectiveness'
   ];
-  var COMMON_STAT_DEFS = COMMON_STATS.map(function (name) { return { name: name, numerical: true, suffix: '%' }; });
-  var state = { stats: COMMON_STAT_DEFS.slice(), stickers: [], sheet: Array(30).fill(true), counts: {} };
+
+  // ---------- premade stickers ----------
+  function sh(rows) {
+    var c = [];
+    rows.forEach(function (r, y) { for (var x = 0; x < r.length; x++) if (r.charAt(x) === 'X') c.push([x, y]); });
+    return c;
+  }
+  function box(w, h) { var r = []; for (var i = 0; i < h; i++) r.push(new Array(w + 1).join('X')); return r; }
+  function P(name, rows, common, rare, epic) { return { name: name, cells: sh(rows), common: common, effects: [rare, epic] }; }
+
+  var PRESETS = [
+    P('Retro Flair', box(2, 2), 'Collection Range', '10% Blop Value', 'Blops deal 1 damage to any Bloon they touch while being collected'),
+    P('Pop Pop Pop!', box(3, 2), 'Hero Pierce', '30% Movement Speed if all monkeys in the team are the same type', '30% Team Pierce if all monkeys in the team are Primary'),
+    P('Pow Pow Pow!', box(3, 2), 'Hero Damage', '30% Movement Speed if all monkeys in the team are the same type', '30% Team Damage if all monkeys in the team are Military'),
+    P('Pew Pew Pew!', box(3, 2), 'Hero Attack Speed', '30% Movement Speed if all monkeys in the team are the same type', '30% Team Attack Speed if all monkeys in the team are Magic'),
+    P('Ready to Rumble', box(2, 2), 'Hero Knockback', '5% chance to stun Bloons for 1s when they are hit with a knockback force of 3 or more from the hero', '+10% to stun chance'),
+    P('Retro Style', ['XXX', 'XOX'], 'Luck', '20 additional Blops spawn at the beginning of the stage', '30 additional Blops spawn at the beginning of the stage'),
+    P('Can\'t Hide', ['XXX', 'XX'], 'Hero Pierce', 'Hero attacks have a 20% chance to stun Shield Bloons for 1 second', 'Hero attacks have a 20% chance to pass through shields'),
+    P('Green Thumb', ['XXX', 'OXX'], 'Hero Attack Speed', '20% Hero Crit Chance vs Regrow Bloons', 'Hero has a 20% chance to prevent Bloons from regrowing for 1,000% seconds on hit'),
+    P('Ol\' Faithful', ['X', 'XX'], 'Hero Pierce', '20% Primary Monkey Pierce', '10% size to glaives with Honed Edges'),
+    P('Glitter and Gold', ['XXX', 'OXO'], 'Blop Value', '10% chance of getting a Primary Monkey when rolling new monkeys', '10% to Primary Monkey chance'),
+    P('Fist of Furry', box(3, 1), 'Hero Damage', '20% Primary Monkey Damage', '10% Knockback to Boomerangs with Heavy Metal'),
+    P('Wheely Fast', ['X', 'XX'], 'Hero Attack Speed', '20% Primary Monkey Attack Speed', '+2 Tacks from Even More Tacks'),
+    P('Off On An Adventure', box(3, 3), 'More Gold', 'Bags and Chests drop 10% more Gold Coins', 'Bags and Chests drop 20% more Gold Coins'),
+    P('Badge of the Marksman', box(3, 1), 'Hero Pierce', '20% Military Monkey Pierce', 'Increase Explosion size by 10% for Direct Hit'),
+    P('Ranking Officer', ['XXX', 'OXO'], 'Blop Value', '10% chance of getting a Military Monkey when rolling new monkeys', '10% to Military Monkey chance'),
+    P('Badge of Valor', ['X', 'XX'], 'Hero Damage', '20% Military Monkey Damage', '+5% Vulnerability Damage from Anti-Material Rounds'),
+    P('Sergeants Stripes', ['X', 'XX'], 'Hero Attack Speed', '20% Military Monkey Attack Speed', '+1 shot per burst to Burst Fire'),
+    P('A Little Magic', ['X', 'XX'], 'Hero Pierce', '20% Magic Monkey Pierce', 'Bulky Potions are 10% larger'),
+    P('Magical Moxie', ['XXX', 'OXO'], 'Blop Value', '10% chance of getting a Magic Monkey when rolling new monkeys', '10% to Magic Monkey chance'),
+    P('Lightning Bolt', ['X', 'XX'], 'Hero Damage', '20% Magic Monkey Damage', 'Increase Dark Magic cap by 5'),
+    P('Haste Spell', box(3, 1), 'Hero Attack Speed', '20% Magic Monkey Attack Speed', 'Increase duration of Stronger Acid by 10%'),
+    P('Feeling Lucky', ['XXXXX', 'X', 'XX'], 'Luck', 'Start with 1 Temp HP', 'You can have 1 additional Temp HP at a time'),
+    P('Pretty Fly For a Cacti', ['X', 'XX', 'XXX'], 'Hero Knockback', 'Hero knocks Bloons back 1m when Immune', 'Hero deals 10 damage to each Bloon touched when Immune'),
+    P('That Prickles', ['X', 'XX', 'XXX'], 'Immunity Duration', 'Hero knocks Bloons back 1m when Immune', 'Hero deals 10 damage to each Bloon touched when Immune'),
+    P('Well Warned', ['OXO', 'XXX', 'OXO'], 'Hero Crit Chance', 'Hero critical hits have a 1% chance to Heal 1 once per milestone', '+0.04 to Heal chance'),
+    P('Tough Road Ahead', box(4, 2), 'Blop Value', 'Heal 1 HP on level up', 'Heal 1 more HP on level up'),
+    P('Retro Pizazz', box(2, 1), 'Hero Crit Chance', '100% Hero Crit Damage', 'Bloons popped by a Crit from the hero have a 20% chance to drop x2 Blops'),
+    P('Nick of Time', ['OOX', 'XXXX', 'OOX'], 'Evasion', 'Deal 3,000% damage to the attacking Bloon after a successful dodge', '100% movement speed for 3 seconds on a successful dodge'),
+    P('The Friendly Bloon', ['OXXX', 'OXX', 'XXX'], 'Blop Value', 'Gain 50% Blop Value during boss fights', 'Gain 50% Luck during boss fights'),
+    P('Ultimate Showdown', ['OXXO', 'XXXX'], 'Hero Damage', '20% Hero Boss Damage', 'Hero gains 50% Attack Speed for 10 seconds when a boss fight starts'),
+    { name: 'Glow Up', lamp: true, common: 'Effectiveness', cells: [[0, 0], [1, 0]], effects: ['Vertically adjacent stickers also get the boost', 'Diagonally adjacent stickers also get the boost'] },
+    P('The Wise Frog', box(1, 2), 'Encounter Duration', 'Encounter takes 20% less time to activate (minimum 0.5s)', 'Activating an encounter also gives 5,000% Blops')
+  ];
+  function preset(name) { return PRESETS.filter(function (p) { return p.name === name; })[0]; }
+
+  var state = { stickers: [], sheet: Array(30).fill(true), counters: {} };
   try {
     var saved = JSON.parse(localStorage.getItem(KEY));
     if (saved && saved.stickers) {
       state = saved;
-      state.stats = COMMON_STAT_DEFS.slice().concat((saved.stats || []).filter(function (s) {
-        return COMMON_STATS.indexOf(s.name) < 0;
-      }));
       state.sheet = Array.isArray(saved.sheet) && saved.sheet.length === 30 ? saved.sheet : Array(30).fill(true);
-      state.counts = saved.counts || {};
+      state.counters = saved.counters || {};
     }
   } catch (e) {}
-  var statForm = { name: '' };
-  var form = { name: '', lamp: false, rarity: 1, shape: Array(30).fill(false), eff: [{ stat: '', val: '' }, { stat: '', val: '' }, { stat: '', val: '' }], boost: '10' };
+  var form = { type: '', rarity: 1, val: '' };
   var opts = { requireAll: false };
   var worker = null, solving = false, results = [], sortMode = 0, sel = 0, statusMsg = '';
 
   function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function fmt(v) { return String(Math.round(v * 100) / 100); }
-  function statByName(n) { return state.stats.filter(function (s) { return s.name === n; })[0]; }
   function setStatus(m) { statusMsg = m; $('status').textContent = m; }
   function color(p, i) { return p.def.isLamp ? '#ffe066' : 'hsl(' + ((i * 114.5) % 360) + ',55%,72%)'; }
 
-  function statText(name, v) { var s = statByName(name); return fmt(v) + (s ? s.suffix : '') + ' ' + name; }
+  function statText(name, v) { return fmt(v) + '% ' + name; }
   function effectsText(d) {
-    if (d.isLamp) return '+' + fmt(d.lampBoost) + '% to each touching sticker\'s common stat, once per Glow Up (' + (d.rarity === 1 ? 'left/right' : d.rarity === 2 ? 'left/right/up/down' : 'all 8 directions') + ')';
-    return d.effects.slice(0, d.rarity).map(function (e) {
-      var s = statByName(e.stat); return !s ? e.stat : s.numerical ? fmt(e.value) + s.suffix + ' ' + s.name : s.name;
-    }).join(', ');
+    if (d.isLamp) return [fmt(d.lampBoost) + '% Effectiveness'].concat(preset('Glow Up').effects.slice(0, d.rarity - 1)).join(', ');
+    return d.effects.slice(0, d.rarity).map(function (e, i) { return i === 0 ? fmt(e.value) + '% ' + e.stat : e.stat; }).join(', ');
   }
 
   // ---------- renderers ----------
-  function renderStats() {
-    var common = '<small>Common stats (fixed; affected by Glow Ups):</small>' +
-      COMMON_STATS.map(function (n) {
-        return '<div class="row"><span>' + esc(n) + '</span></div>';
-      }).join('');
-
-    var custom = state.stats.filter(function (s) { return COMMON_STATS.indexOf(s.name) < 0; });
-    $('stats').innerHTML =
-      common +
-      '<small style="display:block;margin-top:8px">Special stats for Rare/Epic effects:</small>' +
-      (custom.length ? custom.map(function (s) {
-        var realIndex = state.stats.indexOf(s);
-        return '<div class="row"><span>' + esc(s.name) + '</span>' +
-          '<button class="danger" data-a="delStat" data-i="' + realIndex + '">×</button></div>';
-      }).join('') : '<small>None yet.</small>') +
-      '<input type="text" data-bind="statName" placeholder="New special stat, e.g. +1 Health" value="' + esc(statForm.name) + '">' +
-      '<button data-a="addStat" style="width:100%">Add special stat</button>' +
-      '<small style="display:block;margin-top:6px">The first (Common) effect always uses one of the fixed common stats above. Rare and Epic effects use these created special stats.</small>' +
-      '<div class="row" style="margin-top:6px"><button data-a="export" style="flex:1">Export Stickers</button><button data-a="import" style="flex:1">Import Stickers</button></div>' +
-      '<input id="importFile" type="file" accept="application/json,.json" style="display:none">';
-  }
-
-  function statOptions(kind, selName) {
-    var list;
-    if (kind === 'common') {
-      list = state.stats.filter(function (s) { return COMMON_STATS.indexOf(s.name) >= 0; });
-    } else {
-      list = state.stats.filter(function (s) { return COMMON_STATS.indexOf(s.name) < 0; });
-    }
-    return '<option value="">— pick a ' + (kind === 'common' ? 'common' : 'special') + ' stat —</option>' + list.map(function (s) {
-      return '<option value="' + esc(s.name) + '"' + (s.name === selName ? ' selected' : '') + '>' + esc(s.name) + '</option>';
-    }).join('');
-  }
-
-
   function renderForm() {
-    var h = '<input type="text" data-bind="name" placeholder="Sticker name" value="' + esc(form.name) + '">' +
-      '<div class="seg"><button data-a="formLamp" data-v="0" class="' + (!form.lamp ? 'on' : '') + '">Normal sticker</button>' +
-      '<button data-a="formLamp" data-v="1" class="' + (form.lamp ? 'on' : '') + '">Glow Up</button></div>' +
+    var p = preset(form.type);
+    var h = '<select data-bind="preset"><option value="">— pick a sticker —</option>' + PRESETS.slice().sort(function (a, b) { return a.name.localeCompare(b.name); }).map(function (x) {
+      return '<option value="' + esc(x.name) + '"' + (x.name === form.type ? ' selected' : '') + '>' + esc(x.name) + '</option>';
+    }).join('') + '</select>' +
       '<div class="seg">' + RAR.map(function (r, i) { return '<button data-a="formRarity" data-v="' + (i + 1) + '" class="' + (form.rarity === i + 1 ? 'on' : '') + '">' + r + '</button>'; }).join('') + '</div>';
-    if (form.lamp) {
-      h += '<small>Glow Up shape is fixed 1x2. Each Glow Up boosts a touching sticker only once, even if multiple cells touch it. Reach: Common = left/right, Rare = + up/down, Epic = + diagonals.</small>' +
-           '<div class="row"><small>Boost %</small><input type="number" step="any" min="0" data-bind="boost" style="width:90px" value="' + esc(form.boost) + '"></div>';
-    } else {
-      h += '<small>Shape (click squares; must be connected):</small><div class="grid" style="grid-template-columns:repeat(6,28px)">';
-      for (var i = 0; i < 30; i++) h += '<button class="cell shape ' + (form.shape[i] ? 'on' : '') + '" style="width:28px;height:28px" data-a="shape" data-i="' + i + '"></button>';
-      h += '</div>';
-      for (var e = 0; e < form.rarity; e++) {
-        var sd = statByName(form.eff[e].stat);
-        h += '<small>' + (e === 0 ? 'Common effect' : e === 1 ? 'Rare effect (special stat)' : 'Epic effect (special stat)') + '</small>' +
-             '<select data-bind="effStat" data-i="' + e + '">' + statOptions(e === 0 ? 'common' : 'special', form.eff[e].stat) + '</select>' +
-             (sd && sd.numerical ? '<div class="row"><small>Value ' + esc(sd.suffix) + '</small><input type="number" step="any" min="0" data-bind="effVal" data-i="' + e + '" style="width:90px" value="' + esc(form.eff[e].val) + '"></div>' : '');
+    if (p) {
+      h += '<div class="row"><small>' + esc(p.common) + ' %</small><input type="number" step="any" min="0" data-bind="val" style="width:90px" value="' + esc(form.val) + '"></div>';
+      if (p.effects && form.rarity >= 2) {
+        h += '<ul class="fx">' + p.effects.slice(0, form.rarity - 1).map(function (t) { return '<li><small>' + esc(t) + '</small></li>'; }).join('') + '</ul>';
       }
     }
     h += '<button class="primary" data-a="createSticker">Create sticker</button>';
@@ -417,24 +412,31 @@ function solve(input) {
 
   function renderStickers() {
     $('stickers').innerHTML = state.stickers.length ? state.stickers.map(function (s, i) {
-      var c = state.counts[s.name] || 0;
-      return '<div class="row"><div><div>' + esc(s.name) + ' <small>(' + (s.isLamp ? 'Glow Up ' : '') + RAR[s.rarity - 1] + ', ' + s.cells.length + ' sq)</small></div><small>' + esc(effectsText(s)) + '</small></div>' +
-             '<div class="counter"><button data-a="cnt" data-i="' + i + '" data-v="-1">−</button><b>' + c + '</b><button data-a="cnt" data-i="' + i + '" data-v="1">+</button>' +
-             '<button class="danger" data-a="delSticker" data-i="' + i + '">×</button></div></div>';
+      return '<div class="row"><label class="chk" style="margin:0"><input type="checkbox" data-a="toggle" data-i="' + i + '"' + (s.include ? ' checked' : '') + '>' +
+             '<div><div>' + esc(s.name) + ' <small>(' + (s.isLamp ? 'Glow Up ' : '') + RAR[s.rarity - 1] + ', ' + s.cells.length + ' sq)</small></div><small>' + esc(effectsText(s)) + '</small></div></label>' +
+             '<button class="danger" data-a="delSticker" data-i="' + i + '">×</button></div>';
     }).join('') : '<small>None yet.</small>';
     $('opts').innerHTML =
       '<label class="chk"><input type="checkbox" data-bind="req"' + (opts.requireAll ? ' checked' : '') + '> Every selected sticker must be placed</label>' +
       (solving ? '<button class="primary" data-a="cancel" style="background:#e5645b;border-color:#e5645b">Cancel</button>' : '<button class="primary" data-a="solve">SOLVE</button>');
   }
 
+  var CMP = [
+    function (a, b) { return b.highestStat - a.highestStat || b.balance - a.balance || b.raritySum - a.raritySum; },
+    function (a, b) { return b.balance - a.balance || b.highestStat - a.highestStat || b.raritySum - a.raritySum; },
+    function (a, b) { return b.epicCount - a.epicCount || b.rareCount - a.rareCount || b.commonCount - a.commonCount; }
+  ];
+
+  // Overall Best: sum of each solve's placement in the three categories (lowest total wins)
+  function rankAll() {
+    results.forEach(function (s) { s.rankSum = 0; });
+    CMP.forEach(function (c) { results.slice().sort(c).forEach(function (s, i) { s.rankSum += i + 1; }); });
+  }
+
   function sorted() {
     var r = results.slice();
-    var by = [
-      function (a, b) { return b.highestStat - a.highestStat || b.balance - a.balance || b.raritySum - a.raritySum; },
-      function (a, b) { return b.balance - a.balance || b.highestStat - a.highestStat || b.raritySum - a.raritySum; },
-      function (a, b) { return b.epicCount - a.epicCount || b.rareCount - a.rareCount || b.commonCount - a.commonCount; }
-    ][sortMode];
-    return r.sort(by);
+    r.sort(sortMode === 0 ? function (a, b) { return a.rankSum - b.rankSum || CMP[0](a, b); } : CMP[sortMode - 1]);
+    return r.slice(0, 10);
   }
 
   function summary(s) {
@@ -445,11 +447,11 @@ function solve(input) {
 
   function describe(p) {
     var d = p.def;
-    if (d.isLamp) return d.name + ' [' + RAR[d.rarity - 1] + ' Glow Up]: ' + fmt(p.lampBoost) + '% boost to each touching sticker\'s common stat, once';
+    if (d.isLamp) return d.name + ' [' + RAR[d.rarity - 1] + ' Glow Up]: ' + fmt(p.lampBoost) + '% Effectiveness';
     return d.name + ' [' + RAR[d.rarity - 1] + ']: ' + d.effects.slice(0, d.rarity).map(function (e, i) {
-      var s = statByName(e.stat); if (!s) return e.stat; if (!s.numerical) return s.name;
-      var t = fmt(i === 0 ? p.commonValue : e.value) + s.suffix + ' ' + s.name;
-      if (i === 0 && p.multiplier > 1.0001) t += ' (base ' + fmt(e.value) + ', x' + fmt(p.multiplier) + ' from Glow Ups)';
+      if (i > 0) return e.stat;
+      var t = fmt(p.commonValue) + '% ' + e.stat;
+      if (p.multiplier > 1.0001) t += ' (base ' + fmt(e.value) + ', x' + fmt(p.multiplier) + ' from Glow Ups)';
       return t;
     }).join(', ');
   }
@@ -458,84 +460,63 @@ function solve(input) {
     if (!results.length) { $('results').innerHTML = ''; return; }
     var list = sorted(); if (sel >= list.length) sel = 0;
     var h = '<div class="seg">' + SORTS.map(function (n, i) { return '<button data-a="sort" data-v="' + i + '" class="' + (sortMode === i ? 'on' : '') + '">' + n + '</button>'; }).join('') + '</div><div id="list">';
-    list.forEach(function (s, i) { h += '<button class="sol ' + (i === sel ? 'sel' : '') + '" data-a="pick" data-i="' + i + '">#' + (i + 1) + '   ' + esc(summary(s)) + '</button>'; });
+    list.forEach(function (s, i) { h += '<button class="sol ' + (i === sel ? 'sel' : '') + '" data-a="pick" data-i="' + i + '">#' + (i + 1) + '   ' + esc(summary(s)) + (sortMode === 0 ? esc('\nRank total ' + s.rankSum) : '') + '</button>'; });
     h += '</div>';
     var s = list[sel], owner = Array(30).fill(-1);
     s.placed.forEach(function (p, pi) { p.cells.forEach(function (c) { owner[c] = pi; }); });
     h += '<h2>Selected solution</h2><div class="grid" style="grid-template-columns:repeat(6,44px)">';
     for (var i = 0; i < 30; i++) {
       var o = owner[i], bg = !state.sheet[i] ? '#23262e' : o < 0 ? '#b9bdc7' : color(s.placed[o], o);
-      h += '<div class="cell" style="width:44px;height:44px;background:' + bg + '">' + (o >= 0 ? esc(s.placed[o].def.name.charAt(0).toUpperCase()) : '') + '</div>';
+      h += '<div class="cell" style="width:44px;height:44px;background:' + bg + '">' + (o >= 0 ? (o + 1) : '') + '</div>';
     }
     h += '</div><div style="margin:8px 0">' + esc(summary(s)).replace(/\n/g, '<br>') + '</div>';
     s.placed.forEach(function (p, pi) {
-      h += '<div class="legend"><div class="cell" style="background:' + color(p, pi) + '">' + esc(p.def.name.charAt(0).toUpperCase()) + '</div><div>' + esc(describe(p)) + '</div></div>';
+      h += '<div class="legend"><div class="cell" style="background:' + color(p, pi) + '">' + (pi + 1) + '</div><div>' + esc(describe(p)) + '</div></div>';
     });
     $('results').innerHTML = h;
   }
 
-  function renderAll() { renderStats(); renderForm(); rendersheet(); renderStickers(); renderResults(); }
+  function renderAll() { renderForm(); rendersheet(); renderStickers(); renderResults(); }
 
   // ---------- actions ----------
-  function connected(cells) {
-    var key = function (c) { return c[0] + ',' + c[1]; }, set = {};
-    cells.forEach(function (c) { set[key(c)] = 1; });
-    var seen = {}, q = [cells[0]]; seen[key(cells[0])] = 1;
-    while (q.length) {
-      var c = q.pop();
-      [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(function (d) {
-        var n = [c[0] + d[0], c[1] + d[1]];
-        if (set[key(n)] && !seen[key(n)]) { seen[key(n)] = 1; q.push(n); }
-      });
-    }
-    return Object.keys(seen).length === cells.length;
-  }
-
   function createSticker() {
-    var n = form.name.trim();
-    if (!n) return setStatus('A sticker needs a name.');
-    if (state.stickers.some(function (s) { return s.name.toLowerCase() === n.toLowerCase(); })) return setStatus('A sticker with that name already exists.');
-    var st = { name: n, rarity: form.rarity, isLamp: form.lamp, cells: [], effects: [], lampBoost: 10 };
-    if (form.lamp) {
-      var b = parseFloat(form.boost);
-      if (!(b > 0)) return setStatus('Glow Up boost must be a number above 0.');
-      st.lampBoost = b; st.cells = [[0, 0], [1, 0]];
+    var p = preset(form.type);
+    if (!p) return setStatus('Pick a sticker first.');
+    var v = parseFloat(form.val);
+    var st = { type: p.name, rarity: form.rarity, isLamp: !!p.lamp, cells: p.cells.map(function (c) { return [c[0], c[1]]; }), effects: [], lampBoost: 10, include: true };
+    if (p.lamp) {
+      if (!(v > 0)) return setStatus('Effectiveness must be a number above 0.');
+      st.lampBoost = v;
     } else {
-      var cells = [];
-      form.shape.forEach(function (on, i) { if (on) cells.push([i % 6, Math.floor(i / 6)]); });
-      if (!cells.length) return setStatus('Draw the sticker shape first.');
-      if (!connected(cells)) return setStatus('All sticker squares must connect edge to edge.');
-      var mx = Math.min.apply(null, cells.map(function (c) { return c[0]; })), my = Math.min.apply(null, cells.map(function (c) { return c[1]; }));
-      st.cells = cells.map(function (c) { return [c[0] - mx, c[1] - my]; });
-      for (var i = 0; i < form.rarity; i++) {
-        var sd = statByName(form.eff[i].stat);
-        if (!sd) return setStatus('Pick a stat for effect ' + (i + 1) + '.');
-        if (i === 0 && !sd.numerical) return setStatus('The common effect must be a common stat.');
-        var v = 0;
-        if (sd.numerical) { v = parseFloat(form.eff[i].val); if (!(v >= 0)) return setStatus('Effect ' + (i + 1) + ' needs a number (0 or more).'); }
-        st.effects.push({ stat: sd.name, value: v });
-      }
+      if (!(v >= 0)) return setStatus('Enter the ' + p.common + ' % value (0 or more).');
+      st.effects.push({ stat: p.common, value: v });
+      for (var i = 0; i < form.rarity - 1; i++) st.effects.push({ stat: p.effects[i], value: 0 });
     }
-    state.stickers.push(st); state.counts[n] = 1; form.name = ''; save(); renderAll(); setStatus('Created sticker \'' + n + '\'.');
+    state.counters[p.name] = (state.counters[p.name] || 0) + 1;
+    st.name = p.name + ' ' + state.counters[p.name];
+    state.stickers.push(st); form.val = ''; save(); renderAll(); setStatus('Created sticker \'' + st.name + '\'.');
   }
 
   function finish(res) {
     solving = false; worker = null;
-    var inst = res.solutions;
-    results = inst.map(function (s) { s.placed.forEach(function (p) { p.def = lastStickers[p.sticker]; }); return s; });
-    sel = 0;
+    results = res.solutions.map(function (s) { s.placed.forEach(function (p) { p.def = lastStickers[p.sticker]; }); return s; });
+    rankAll(); sel = 0;
     if (!results.length) setStatus('No placement exists: the selected stickers can\'t all fit on the sticker sheet.');
-    else setStatus(results.length + ' solution(s) found (' + res.nodes.toLocaleString() + ' search steps).' + (res.truncated ? ' Search limit reached, so the list may be incomplete.' : ''));
+    else setStatus(results.length + ' solution(s) found (' + res.nodes.toLocaleString() + ' search steps). Showing the top 10 per category.' + (res.truncated ? ' Search limit reached, so the list may be incomplete.' : ''));
     renderAll();
   }
 
   var lastStickers = [];
   function startSolve() {
     var instances = [];
-    state.stickers.forEach(function (s, i) { for (var k = 0; k < (state.counts[s.name] || 0); k++) instances.push(i); });
-    if (!instances.length) return setStatus('Select at least one sticker (use the + buttons).');
+    state.stickers.forEach(function (s, i) { if (s.include) instances.push(i); });
+    if (!instances.length) return setStatus('Select at least one sticker to place.');
     lastStickers = state.stickers.slice();
-    var input = JSON.parse(JSON.stringify({ stats: state.stats, stickers: state.stickers, sheet: state.sheet, instances: instances, requireAll: opts.requireAll }));
+    var stats = COMMON_STATS.map(function (n) { return { name: n, numerical: true }; }), seen = {};
+    state.stickers.forEach(function (st) {
+      st.effects.forEach(function (e, k) { if (k > 0 && !seen[e.stat]) { seen[e.stat] = 1; stats.push({ name: e.stat, numerical: false }); } });
+    });
+    var input = JSON.parse(JSON.stringify({ stats: stats, stickers: state.stickers, sheet: state.sheet, instances: instances, requireAll: opts.requireAll }));
     results = []; solving = true; setStatus('Solving...'); renderAll();
     var runSync = function () { setTimeout(function () { finish(solveFn(input)); }, 20); };
     if (typeof Worker === 'undefined') return runSync();
@@ -549,121 +530,23 @@ function solve(input) {
 
   function act(a, d) {
     var i = +d.i, v = d.v;
-    if (a === 'addStat') {
-      var n = statForm.name.trim();
-      if (!n) return setStatus('A special stat needs a name.');
-      if (COMMON_STATS.some(function (s) { return s.toLowerCase() === n.toLowerCase(); })) return setStatus('That name is reserved for a common stat.');
-      if (state.stats.some(function (s) { return s.name.toLowerCase() === n.toLowerCase(); })) return setStatus('That stat already exists.');
-      state.stats.push({ name: n, numerical: false, suffix: '' });
-      statForm.name = ''; save(); renderAll(); setStatus('Added special stat \'' + n + '\'.');
-    }
-    else if (a === 'delStat') {
-      var st = state.stats[i];
-      if (!st || COMMON_STATS.indexOf(st.name) >= 0) return setStatus('Common stats are fixed and cannot be deleted.');
-      var user = state.stickers.filter(function (s) { return s.effects.some(function (e) { return e.stat === st.name; }); })[0];
-      if (user) return setStatus('Can\'t delete \'' + st.name + '\': sticker \'' + user.name + '\' uses it.');
-      state.stats.splice(i, 1); form.eff.forEach(function (e) { if (e.stat === st.name) e.stat = ''; }); save(); renderAll();
-    }
-    else if (a === 'formLamp') { form.lamp = v === '1'; renderForm(); }
-    else if (a === 'formRarity') { form.rarity = +v; renderForm(); }
-    else if (a === 'shape') { form.shape[i] = !form.shape[i]; renderForm(); }
+    if (a === 'formRarity') { form.rarity = +v; renderForm(); }
     else if (a === 'createSticker') createSticker();
     else if (a === 'sheet') { state.sheet[i] = !state.sheet[i]; save(); rendersheet(); }
     else if (a === 'sheetAll') { state.sheet = Array(30).fill(true); save(); rendersheet(); }
-    else if (a === 'cnt') { var nm = state.stickers[i].name; state.counts[nm] = Math.max(0, (state.counts[nm] || 0) + (+v)); save(); renderStickers(); }
-    else if (a === 'delSticker') { delete state.counts[state.stickers[i].name]; state.stickers.splice(i, 1); save(); renderAll(); }
+    else if (a === 'toggle') { state.stickers[i].include = !state.stickers[i].include; save(); renderStickers(); }
+    else if (a === 'delSticker') { state.stickers.splice(i, 1); save(); renderAll(); }
     else if (a === 'solve') startSolve();
     else if (a === 'cancel') { if (worker) worker.terminate(); worker = null; solving = false; setStatus('Cancelled.'); renderStickers(); }
     else if (a === 'sort') { sortMode = +v; sel = 0; renderResults(); }
     else if (a === 'pick') { sel = i; renderResults(); }
-    else if (a === 'export') exportJSON();
-    else if (a === 'import') $('importFile').click();
-  }
-
-
-  function exportJSON() {
-    var payload = {
-      version: 1,
-      commonStats: COMMON_STATS.slice(),
-      specialStats: state.stats.filter(function (st) { return COMMON_STATS.indexOf(st.name) < 0; }),
-      stickers: state.stickers.map(function (st) { return JSON.parse(JSON.stringify(st)); }),
-      sheet: state.sheet.slice(),
-      counts: JSON.parse(JSON.stringify(state.counts || {}))
-    };
-    var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = 'sticker-sheet.json';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-    setStatus('Stickers exported.');
-  }
-
-  function importJSON(file) {
-    var reader = new FileReader();
-    reader.onload = function () {
-      try {
-        var data = JSON.parse(reader.result);
-        if (!data || !Array.isArray(data.stickers) || !Array.isArray(data.specialStats)) throw new Error('Invalid sticker export.');
-        var special = data.specialStats.filter(function (st) {
-          return st && typeof st.name === 'string' && st.name.trim() && COMMON_STATS.indexOf(st.name) < 0;
-        }).map(function (st) {
-          return { name: st.name.trim(), numerical: !!st.numerical, suffix: st.numerical ? String(st.suffix || '') : '' };
-        });
-        var names = {};
-        special = special.filter(function (st) {
-          var key = st.name.toLowerCase();
-          if (names[key]) return false;
-          names[key] = true;
-          return true;
-        });
-        var stickers = data.stickers.filter(function (st) {
-          return st && typeof st.name === 'string' && st.name.trim() && Array.isArray(st.cells);
-        }).map(function (st) {
-          var copy = JSON.parse(JSON.stringify(st));
-          copy.name = copy.name.trim();
-          copy.rarity = Math.max(1, Math.min(3, Number(copy.rarity) || 1));
-          copy.isLamp = !!copy.isLamp;
-          copy.effects = Array.isArray(copy.effects) ? copy.effects.slice(0, copy.rarity) : [];
-          copy.lampBoost = Number(copy.lampBoost) || 10;
-          return copy;
-        });
-        var stickerNames = {};
-        stickers = stickers.filter(function (st) {
-          var key = st.name.toLowerCase();
-          if (stickerNames[key]) return false;
-          stickerNames[key] = true;
-          return true;
-        });
-        state.stats = COMMON_STAT_DEFS.slice().concat(special);
-        state.stickers = stickers;
-        state.sheet = Array.isArray(data.sheet) && data.sheet.length === 30 ? data.sheet.map(Boolean) : Array(30).fill(true);
-        state.counts = {};
-        stickers.forEach(function (st) { var hasCount = data.counts && Object.prototype.hasOwnProperty.call(data.counts, st.name); state.counts[st.name] = hasCount ? Math.max(0, Number(data.counts[st.name]) || 0) : 1; });
-        form.name = ''; form.shape = Array(30).fill(false); form.eff = [{ stat: '', val: '' }, { stat: '', val: '' }, { stat: '', val: '' }];
-        save(); results = []; sel = 0; renderAll(); setStatus('Imported ' + stickers.length + ' sticker(s) and ' + special.length + ' special stat(s).');
-      } catch (err) {
-        setStatus('Import failed: ' + err.message);
-      }
-      $('importFile').value = '';
-    };
-    reader.onerror = function () { setStatus('Import failed: could not read the file.'); $('importFile').value = ''; };
-    reader.readAsText(file);
   }
 
   function onField(e) {
     var t = e.target, b = t.dataset && t.dataset.bind;
     if (!b) return;
-    var i = +t.dataset.i;
-    if (b === 'statName') statForm.name = t.value;
-    else if (b === 'statSuffix') statForm.suffix = t.value;
-    else if (b === 'name') form.name = t.value;
-    else if (b === 'boost') form.boost = t.value;
-    else if (b === 'effVal') form.eff[i].val = t.value;
-    else if (b === 'effStat') { if (e.type === 'change') { form.eff[i].stat = t.value; renderForm(); } }
+    if (b === 'preset') { if (e.type === 'change') { form.type = t.value; form.val = ''; renderForm(); } }
+    else if (b === 'val') form.val = t.value;
     else if (b === 'req') opts.requireAll = t.checked;
   }
 
@@ -673,12 +556,9 @@ function solve(input) {
   });
   document.addEventListener('input', onField);
   document.addEventListener('change', onField);
-  document.addEventListener('change', function (e) {
-    if (e.target && e.target.id === 'importFile' && e.target.files && e.target.files[0]) importJSON(e.target.files[0]);
-  });
 
   renderAll();
-  window.__stickerApp = { act: act, state: function () { return state; }, form: form, statForm: statForm, opts: opts, results: function () { return results; }, status: function () { return statusMsg; }, isSolving: function () { return solving; } };
+  window.__stickerApp = { act: act, state: function () { return state; }, form: form, opts: opts, results: function () { return results; }, status: function () { return statusMsg; }, isSolving: function () { return solving; } };
 })();
 </script>
 </body>
