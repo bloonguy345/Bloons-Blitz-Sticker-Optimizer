@@ -50,7 +50,7 @@
   </section>
   <section>
     <h2>3. Sticker Sheet <small>(green = sticker allowed)</small></h2>
-    <div id="board"></div>
+    <div id="sheet"></div>
     <h2>4. Stickers <small>(copies to place)</small></h2>
     <div id="stickers"></div>
     <div id="opts"></div>
@@ -66,13 +66,13 @@
 <script id="solver" type="text/plain">
 function solve(input) {
   var N = 6, EPS = 1e-4;
-  var stats = input.stats, stickers = input.stickers, board = input.board;
+  var stats = input.stats, stickers = input.stickers, sheet = input.sheet;
   var requireAll = !!input.requireAll;
   var maxNodes = input.maxNodes || 20000000, maxSolutions = input.maxSolutions || 300;
   var S = stats.length, idx = {};
   stats.forEach(function (s, i) { idx[s.name] = i; });
   var avail = 0;
-  for (var i = 0; i < N * N; i++) if (board[i]) avail |= 1 << i;
+  for (var i = 0; i < N * N; i++) if (sheet[i]) avail |= 1 << i;
 
   function popcount(v) { var c = 0; while (v) { v &= v - 1; c++; } return c; }
 
@@ -309,7 +309,7 @@ function solve(input) {
   var $ = function (id) { return document.getElementById(id); };
   var SRC = $('solver').textContent;
   var solveFn = new Function(SRC + '\nreturn solve;')();
-  var RAR = ['Common', 'Rare', 'Epic'], KEY = 'stickerBoardV2';
+  var RAR = ['Common', 'Rare', 'Epic'], KEY = 'stickersheetV2';
   var SORTS = ['Highest Stats', 'Balance', 'Highest Rarity'];
 
   var COMMON_STATS = [
@@ -318,7 +318,7 @@ function solve(input) {
     'More Gold', 'Immunity Duration', 'Evasion', 'Encounter Duration'
   ];
   var COMMON_STAT_DEFS = COMMON_STATS.map(function (name) { return { name: name, numerical: true, suffix: '%' }; });
-  var state = { stats: COMMON_STAT_DEFS.slice(), stickers: [], board: Array(30).fill(true), counts: {} };
+  var state = { stats: COMMON_STAT_DEFS.slice(), stickers: [], sheet: Array(30).fill(true), counts: {} };
   try {
     var saved = JSON.parse(localStorage.getItem(KEY));
     if (saved && saved.stickers) {
@@ -326,7 +326,7 @@ function solve(input) {
       state.stats = COMMON_STAT_DEFS.slice().concat((saved.stats || []).filter(function (s) {
         return COMMON_STATS.indexOf(s.name) < 0;
       }));
-      state.board = Array.isArray(saved.board) && saved.board.length === 30 ? saved.board : Array(30).fill(true);
+      state.sheet = Array.isArray(saved.sheet) && saved.sheet.length === 30 ? saved.sheet : Array(30).fill(true);
       state.counts = saved.counts || {};
     }
   } catch (e) {}
@@ -409,10 +409,10 @@ function solve(input) {
     $('form').innerHTML = h;
   }
 
-  function renderBoard() {
+  function rendersheet() {
     var h = '<div class="grid" style="grid-template-columns:repeat(6,44px)">';
-    for (var i = 0; i < 30; i++) h += '<button class="cell ' + (state.board[i] ? 'avail' : 'blocked') + '" style="width:44px;height:44px" data-a="board" data-i="' + i + '"></button>';
-    $('board').innerHTML = h + '</div><button data-a="boardAll">Make all squares available</button>';
+    for (var i = 0; i < 30; i++) h += '<button class="cell ' + (state.sheet[i] ? 'avail' : 'blocked') + '" style="width:44px;height:44px" data-a="sheet" data-i="' + i + '"></button>';
+    $('sheet').innerHTML = h + '</div><button data-a="sheetAll">Make all squares available</button>';
   }
 
   function renderStickers() {
@@ -464,7 +464,7 @@ function solve(input) {
     s.placed.forEach(function (p, pi) { p.cells.forEach(function (c) { owner[c] = pi; }); });
     h += '<h2>Selected solution</h2><div class="grid" style="grid-template-columns:repeat(6,44px)">';
     for (var i = 0; i < 30; i++) {
-      var o = owner[i], bg = !state.board[i] ? '#23262e' : o < 0 ? '#b9bdc7' : color(s.placed[o], o);
+      var o = owner[i], bg = !state.sheet[i] ? '#23262e' : o < 0 ? '#b9bdc7' : color(s.placed[o], o);
       h += '<div class="cell" style="width:44px;height:44px;background:' + bg + '">' + (o >= 0 ? esc(s.placed[o].def.name.charAt(0).toUpperCase()) : '') + '</div>';
     }
     h += '</div><div style="margin:8px 0">' + esc(summary(s)).replace(/\n/g, '<br>') + '</div>';
@@ -474,7 +474,7 @@ function solve(input) {
     $('results').innerHTML = h;
   }
 
-  function renderAll() { renderStats(); renderForm(); renderBoard(); renderStickers(); renderResults(); }
+  function renderAll() { renderStats(); renderForm(); rendersheet(); renderStickers(); renderResults(); }
 
   // ---------- actions ----------
   function connected(cells) {
@@ -535,7 +535,7 @@ function solve(input) {
     state.stickers.forEach(function (s, i) { for (var k = 0; k < (state.counts[s.name] || 0); k++) instances.push(i); });
     if (!instances.length) return setStatus('Select at least one sticker (use the + buttons).');
     lastStickers = state.stickers.slice();
-    var input = JSON.parse(JSON.stringify({ stats: state.stats, stickers: state.stickers, board: state.board, instances: instances, requireAll: opts.requireAll }));
+    var input = JSON.parse(JSON.stringify({ stats: state.stats, stickers: state.stickers, sheet: state.sheet, instances: instances, requireAll: opts.requireAll }));
     results = []; solving = true; setStatus('Solving...'); renderAll();
     var runSync = function () { setTimeout(function () { finish(solveFn(input)); }, 20); };
     if (typeof Worker === 'undefined') return runSync();
@@ -568,8 +568,8 @@ function solve(input) {
     else if (a === 'formRarity') { form.rarity = +v; renderForm(); }
     else if (a === 'shape') { form.shape[i] = !form.shape[i]; renderForm(); }
     else if (a === 'createSticker') createSticker();
-    else if (a === 'board') { state.board[i] = !state.board[i]; save(); renderBoard(); }
-    else if (a === 'boardAll') { state.board = Array(30).fill(true); save(); renderBoard(); }
+    else if (a === 'sheet') { state.sheet[i] = !state.sheet[i]; save(); rendersheet(); }
+    else if (a === 'sheetAll') { state.sheet = Array(30).fill(true); save(); rendersheet(); }
     else if (a === 'cnt') { var nm = state.stickers[i].name; state.counts[nm] = Math.max(0, (state.counts[nm] || 0) + (+v)); save(); renderStickers(); }
     else if (a === 'delSticker') { delete state.counts[state.stickers[i].name]; state.stickers.splice(i, 1); save(); renderAll(); }
     else if (a === 'solve') startSolve();
@@ -587,7 +587,7 @@ function solve(input) {
       commonStats: COMMON_STATS.slice(),
       specialStats: state.stats.filter(function (st) { return COMMON_STATS.indexOf(st.name) < 0; }),
       stickers: state.stickers.map(function (st) { return JSON.parse(JSON.stringify(st)); }),
-      board: state.board.slice(),
+      sheet: state.sheet.slice(),
       counts: JSON.parse(JSON.stringify(state.counts || {}))
     };
     var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -640,7 +640,7 @@ function solve(input) {
         });
         state.stats = COMMON_STAT_DEFS.slice().concat(special);
         state.stickers = stickers;
-        state.board = Array.isArray(data.board) && data.board.length === 30 ? data.board.map(Boolean) : Array(30).fill(true);
+        state.sheet = Array.isArray(data.sheet) && data.sheet.length === 30 ? data.sheet.map(Boolean) : Array(30).fill(true);
         state.counts = {};
         stickers.forEach(function (st) { var hasCount = data.counts && Object.prototype.hasOwnProperty.call(data.counts, st.name); state.counts[st.name] = hasCount ? Math.max(0, Number(data.counts[st.name]) || 0) : 1; });
         form.name = ''; form.shape = Array(30).fill(false); form.eff = [{ stat: '', val: '' }, { stat: '', val: '' }, { stat: '', val: '' }];
