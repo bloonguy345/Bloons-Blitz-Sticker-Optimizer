@@ -330,7 +330,7 @@ function solve(input) {
       state.counts = saved.counts || {};
     }
   } catch (e) {}
-  var statForm = { name: '', numerical: false, suffix: '' };
+  var statForm = { name: '' };
   var form = { name: '', lamp: false, rarity: 1, shape: Array(30).fill(false), eff: [{ stat: '', val: '' }, { stat: '', val: '' }, { stat: '', val: '' }], boost: '10' };
   var opts = { requireAll: false };
   var worker = null, solving = false, results = [], sortMode = 0, sel = 0, statusMsg = '';
@@ -354,7 +354,7 @@ function solve(input) {
   function renderStats() {
     var common = '<small>Common stats (fixed; affected by Glow Ups):</small>' +
       COMMON_STATS.map(function (n) {
-        return '<div class="row"><span>' + esc(n) + ' <small>(numerical, %)</small></span></div>';
+        return '<div class="row"><span>' + esc(n) + '</span></div>';
       }).join('');
 
     var custom = state.stats.filter(function (s) { return COMMON_STATS.indexOf(s.name) < 0; });
@@ -363,15 +363,10 @@ function solve(input) {
       '<small style="display:block;margin-top:8px">Special stats for Rare/Epic effects:</small>' +
       (custom.length ? custom.map(function (s) {
         var realIndex = state.stats.indexOf(s);
-        return '<div class="row"><span>' + esc(s.name) + ' <small>(' +
-          (s.numerical ? 'numerical' + (s.suffix ? ', ' + esc(s.suffix) : '') : 'descriptive') +
-          ')</small></span>' +
+        return '<div class="row"><span>' + esc(s.name) + '</span>' +
           '<button class="danger" data-a="delStat" data-i="' + realIndex + '">×</button></div>';
       }).join('') : '<small>None yet.</small>') +
       '<input type="text" data-bind="statName" placeholder="New special stat, e.g. +1 Health" value="' + esc(statForm.name) + '">' +
-      '<div class="seg"><button data-a="statKind" data-v="1" class="' + (statForm.numerical ? 'on' : '') + '">Numerical</button>' +
-      '<button data-a="statKind" data-v="0" class="' + (!statForm.numerical ? 'on' : '') + '">Descriptive</button></div>' +
-      (statForm.numerical ? '<div class="row"><small>Unit</small><input type="text" data-bind="statSuffix" style="width:70px" value="' + esc(statForm.suffix) + '"></div>' : '') +
       '<button data-a="addStat" style="width:100%">Add special stat</button>' +
       '<small style="display:block;margin-top:6px">The first (Common) effect always uses one of the fixed common stats above. Rare and Epic effects use these created special stats.</small>' +
       '<div class="row" style="margin-top:6px"><button data-a="export" style="flex:1">Export Stickers</button><button data-a="import" style="flex:1">Import Stickers</button></div>' +
@@ -385,7 +380,7 @@ function solve(input) {
     } else {
       list = state.stats.filter(function (s) { return COMMON_STATS.indexOf(s.name) < 0; });
     }
-    return '<option value="">— pick a stat —</option>' + list.map(function (s) {
+    return '<option value="">— pick a ' + (kind === 'common' ? 'common' : 'special') + ' stat —</option>' + list.map(function (s) {
       return '<option value="' + esc(s.name) + '"' + (s.name === selName ? ' selected' : '') + '>' + esc(s.name) + '</option>';
     }).join('');
   }
@@ -405,7 +400,7 @@ function solve(input) {
       h += '</div>';
       for (var e = 0; e < form.rarity; e++) {
         var sd = statByName(form.eff[e].stat);
-        h += '<small>' + (e === 0 ? 'Common effect (numerical stat)' : e === 1 ? 'Rare effect' : 'Epic effect') + '</small>' +
+        h += '<small>' + (e === 0 ? 'Common effect' : e === 1 ? 'Rare effect (special stat)' : 'Epic effect (special stat)') + '</small>' +
              '<select data-bind="effStat" data-i="' + e + '">' + statOptions(e === 0 ? 'common' : 'special', form.eff[e].stat) + '</select>' +
              (sd && sd.numerical ? '<div class="row"><small>Value ' + esc(sd.suffix) + '</small><input type="number" step="any" min="0" data-bind="effVal" data-i="' + e + '" style="width:90px" value="' + esc(form.eff[e].val) + '"></div>' : '');
       }
@@ -515,7 +510,7 @@ function solve(input) {
       for (var i = 0; i < form.rarity; i++) {
         var sd = statByName(form.eff[i].stat);
         if (!sd) return setStatus('Pick a stat for effect ' + (i + 1) + '.');
-        if (i === 0 && !sd.numerical) return setStatus('The common effect must be a numerical stat.');
+        if (i === 0 && !sd.numerical) return setStatus('The common effect must be a common stat.');
         var v = 0;
         if (sd.numerical) { v = parseFloat(form.eff[i].val); if (!(v >= 0)) return setStatus('Effect ' + (i + 1) + ' needs a number (0 or more).'); }
         st.effects.push({ stat: sd.name, value: v });
@@ -554,13 +549,12 @@ function solve(input) {
 
   function act(a, d) {
     var i = +d.i, v = d.v;
-    if (a === 'statKind') { statForm.numerical = v === '1'; renderStats(); }
-    else if (a === 'addStat') {
+    if (a === 'addStat') {
       var n = statForm.name.trim();
       if (!n) return setStatus('A special stat needs a name.');
       if (COMMON_STATS.some(function (s) { return s.toLowerCase() === n.toLowerCase(); })) return setStatus('That name is reserved for a common stat.');
       if (state.stats.some(function (s) { return s.name.toLowerCase() === n.toLowerCase(); })) return setStatus('That stat already exists.');
-      state.stats.push({ name: n, numerical: statForm.numerical, suffix: statForm.numerical ? statForm.suffix : '' });
+      state.stats.push({ name: n, numerical: false, suffix: '' });
       statForm.name = ''; save(); renderAll(); setStatus('Added special stat \'' + n + '\'.');
     }
     else if (a === 'delStat') {
