@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sticker Board Optimizer</title>
+<title>Sticker Sheet Optimizer</title>
 <style>
   :root { --bg:#16181d; --panel:#1f232b; --line:#323846; --text:#e6e8ee; --dim:#8b93a5; --accent:#5aa9ff; --good:#58c36b; }
   * { box-sizing:border-box; }
@@ -49,7 +49,7 @@
     <div id="form"></div>
   </section>
   <section>
-    <h2>3. Board <small>(green = sticker allowed)</small></h2>
+    <h2>3. Sticker Sheet <small>(green = sticker allowed)</small></h2>
     <div id="board"></div>
     <h2>4. Stickers <small>(copies to place)</small></h2>
     <div id="stickers"></div>
@@ -524,7 +524,7 @@ function solve(input) {
     var inst = res.solutions;
     results = inst.map(function (s) { s.placed.forEach(function (p) { p.def = lastStickers[p.sticker]; }); return s; });
     sel = 0;
-    if (!results.length) setStatus('No placement exists: the selected stickers can\'t all fit on the board.');
+    if (!results.length) setStatus('No placement exists: the selected stickers can\'t all fit on the sticker sheet.');
     else setStatus(results.length + ' solution(s) found (' + res.nodes.toLocaleString() + ' search steps).' + (res.truncated ? ' Search limit reached, so the list may be incomplete.' : ''));
     renderAll();
   }
@@ -594,7 +594,7 @@ function solve(input) {
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'sticker-board.json';
+    a.download = 'sticker-sheet.json';
     document.body.appendChild(a);
     a.click();
     a.remove();
