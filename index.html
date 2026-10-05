@@ -39,23 +39,21 @@
   ul.fx { margin:4px 0; padding-left:18px; }
 </style>
 </head>
-<script data-goatcounter="https://bloonguy345.goatcounter.com/count"
-        async src="//gc.zgo.at/count.js"></script>
 <body>
 <div id="app">
   <section>
-    <h2>1. Create sticker</h2>
+    <h2>2. Create sticker</h2>
     <div id="form"></div>
   </section>
   <section>
-    <h2>2. Sticker Sheet<br><small>(green = sticker placement allowed)</small></h2>
+    <h2>3. Sticker Sheet<br><small>(green = sticker placement allowed)</small></h2>
     <div id="sheet"></div>
-    <h2>3. Stickers<br><small>(select stickers to place)</small></h2>
+    <h2>4. Stickers<br><small>(select stickers to place)</small></h2>
     <div id="stickers"></div>
     <div id="opts"></div>
   </section>
   <section>
-    <h2>4. Results</h2>
+    <h2>5. Results</h2>
     <div id="status"></div>
     <div id="results"></div>
   </section>
@@ -339,7 +337,7 @@ function solve(input) {
     P('Green Thumb', ['XXX', 'OXX'], 'Hero Attack Speed', '20% Hero Crit Chance vs Regrow Bloons', 'Hero has a 20% chance to prevent Bloons from regrowing for 1,000% seconds on hit'),
     P('Ol\' Faithful', ['X', 'XX'], 'Hero Pierce', '20% Primary Monkey Pierce', '10% size to glaives with Honed Edges'),
     P('Glitter and Gold', ['XXX', 'OXO'], 'Blop Value', '10% chance of getting a Primary Monkey when rolling new monkeys', '10% to Primary Monkey chance'),
-    P('Fist of Fury', box(3, 1), 'Hero Damage', '20% Primary Monkey Damage', '10% Knockback to Boomerangs with Heavy Metal'),
+    P('Fist of Furry', box(3, 1), 'Hero Damage', '20% Primary Monkey Damage', '10% Knockback to Boomerangs with Heavy Metal'),
     P('Wheely Fast', ['X', 'XX'], 'Hero Attack Speed', '20% Primary Monkey Attack Speed', '+2 Tacks from Even More Tacks'),
     P('Off On An Adventure', box(3, 3), 'More Gold', 'Bags and Chests drop 10% more Gold Coins', 'Bags and Chests drop 20% more Gold Coins'),
     P('Badge of the Marksman', box(3, 1), 'Hero Pierce', '20% Military Monkey Pierce', 'Increase Explosion size by 10% for Direct Hit'),
@@ -431,13 +429,13 @@ function solve(input) {
 
   // Overall Best: sum of each solve's placement in the three categories (lowest total wins)
   function rankAll() {
-    results.forEach(function (s) { s.rankSum = 0; });
-    CMP.forEach(function (c) { results.slice().sort(c).forEach(function (s, i) { s.rankSum += i + 1; }); });
+    results.forEach(function (s) { s.score = 0; });
+    CMP.forEach(function (c) { results.slice().sort(c).forEach(function (s, i) { s.score += 1 / (i + 1); }); });
   }
 
   function sorted() {
     var r = results.slice();
-    r.sort(sortMode === 0 ? function (a, b) { return a.rankSum - b.rankSum || CMP[0](a, b); } : CMP[sortMode - 1]);
+    r.sort(sortMode === 0 ? function (a, b) { return b.score - a.score || CMP[0](a, b); } : CMP[sortMode - 1]);
     return r.slice(0, 10);
   }
 
@@ -462,7 +460,7 @@ function solve(input) {
     if (!results.length) { $('results').innerHTML = ''; return; }
     var list = sorted(); if (sel >= list.length) sel = 0;
     var h = '<div class="seg">' + SORTS.map(function (n, i) { return '<button data-a="sort" data-v="' + i + '" class="' + (sortMode === i ? 'on' : '') + '">' + n + '</button>'; }).join('') + '</div><div id="list">';
-    list.forEach(function (s, i) { h += '<button class="sol ' + (i === sel ? 'sel' : '') + '" data-a="pick" data-i="' + i + '">#' + (i + 1) + '   ' + esc(summary(s)) + (sortMode === 0 ? esc('\nRank total ' + s.rankSum) : '') + '</button>'; });
+    list.forEach(function (s, i) { h += '<button class="sol ' + (i === sel ? 'sel' : '') + '" data-a="pick" data-i="' + i + '">#' + (i + 1) + '   ' + esc(summary(s)) + (sortMode === 0 ? esc('\nOverall score ' + s.score.toFixed(3)) : '') + '</button>'; });
     h += '</div>';
     var s = list[sel], owner = Array(30).fill(-1);
     s.placed.forEach(function (p, pi) { p.cells.forEach(function (c) { owner[c] = pi; }); });
