@@ -37,6 +37,14 @@
   #list { max-height:260px; overflow:auto; }
   label.chk { display:flex; gap:6px; align-items:center; margin:4px 0; }
   ul.fx { margin:4px 0; padding-left:18px; }
+  .priority-list { margin:6px 0 8px; padding:0; list-style:none; }
+  .priority-item { display:flex; align-items:center; gap:8px; padding:6px 8px; margin:3px 0; background:#2a303b; border:1px solid var(--line); border-radius:5px; cursor:grab; transition:transform 160ms ease, opacity 160ms ease; }
+  .priority-item.dragging { opacity:1; }
+  .priority-item.priority-animating { transition:transform 160ms ease; }
+  .priority-drag-clone { background:#2a303b; border:1px solid var(--line); border-radius:5px; box-shadow:0 8px 20px rgba(0,0,0,.35); opacity:.98; }
+  .priority-list { position:relative; }
+  .priority-item { user-select:none; touch-action:none; }
+  .priority-handle { color:var(--dim); user-select:none; }
 </style>
 </head>
 <body>
@@ -59,398 +67,31 @@
   </section>
 </div>
 
-<!-- ================= SOLVER (also runs in a Web Worker, and under Node for testing) ================= -->
-<script id="solver" type="text/plain">
-function solve(input) {
-  var N = 6, H = 5, EPS = 1e-4;
-  var stats = input.stats, stickers = input.stickers, sheet = input.sheet;
-  var requireAll = !!input.requireAll;
-  var maxNodes = input.maxNodes || 20000000, maxSolutions = input.maxSolutions || 300;
-  var S = stats.length, idx = {};
-  stats.forEach(function (s, i) { idx[s.name] = i; });
-  var avail = 0;
-  for (var i = 0; i < N * H; i++) if (sheet[i]) avail |= 1 << i;
-
-  function popcount(v) { var c = 0; while (v) { v &= v - 1; c++; } return c; }
-
-  // Glow Up reach: rarity 1 = horizontal, 2 = + vertical, 3 = + diagonal
-  function lampRange(cells, ownMask, rarity) {
-    var range = 0;
-    cells.forEach(function (c) {
-      var x = c % N, y = (c - x) / N;
-      for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
-        if (!dx && !dy) continue;
-        var diag = dx !== 0 && dy !== 0;
-        var ok = dy === 0 || (dx === 0 && rarity >= 2) || (diag && rarity === 3);
-        if (!ok) continue;
-        var nx = x + dx, ny = y + dy;
-        if (nx < 0 || ny < 0 || nx >= N || ny >= H) continue;
-        range |= 1 << (ny * N + nx);
-      }
-    });
-    return range & ~ownMask;
-  }
-
-  function buildInfo(si) {
-    var d = stickers[si];
-    var inf = { si: si, pls: [], size: d.cells.length, baseVec: null, commonIdx: -1, commonVal: 0, cands: null, achiral: false };
-    var orients = [], seen = {};
-    var cur = d.cells.map(function (c) { return [c[0], c[1]]; });
-    for (var r = 0; r < 4; r++) {
-      var minX = Math.min.apply(null, cur.map(function (c) { return c[0]; }));
-      var minY = Math.min.apply(null, cur.map(function (c) { return c[1]; }));
-      var norm = cur.map(function (c) { return [c[0] - minX, c[1] - minY]; })
-                    .sort(function (a, b) { return a[1] - b[1] || a[0] - b[0]; });
-      var key = norm.join(';');
-      if (!seen[key]) { seen[key] = 1; orients.push(norm); }
-      cur = cur.map(function (c) { return [-c[1], c[0]]; });
-    }
-    // Mirror-closed (achiral) check: the mirrored shape is one of its own rotations.
-    var mc = d.cells.map(function (c) { return [-c[0], c[1]]; });
-    var mx = Math.min.apply(null, mc.map(function (c) { return c[0]; }));
-    var my = Math.min.apply(null, mc.map(function (c) { return c[1]; }));
-    inf.achiral = !!seen[mc.map(function (c) { return [c[0] - mx, c[1] - my]; })
-      .sort(function (a, b) { return a[1] - b[1] || a[0] - b[0]; }).join(';')];
-    orients.forEach(function (o) {
-      var w = Math.max.apply(null, o.map(function (c) { return c[0]; })) + 1;
-      var h = Math.max.apply(null, o.map(function (c) { return c[1]; })) + 1;
-      for (var oy = 0; oy + h <= H; oy++) for (var ox = 0; ox + w <= N; ox++) {
-        var mask = 0, cells = [];
-        o.forEach(function (c) { var bi = (c[1] + oy) * N + (c[0] + ox); cells.push(bi); mask |= 1 << bi; });
-        if ((mask & avail) !== mask) continue;
-        inf.pls.push({ mask: mask, cells: cells, range: d.isLamp ? lampRange(cells, mask, d.rarity) : 0 });
-      }
-    });
-    if (!d.isLamp) {
-      inf.baseVec = new Float64Array(S);
-      for (var e = 0; e < d.effects.length && e < d.rarity; e++) {
-        var ef = d.effects[e], s = idx[ef.stat];
-        if (s === undefined) continue;
-        if (stats[s].numerical) {
-          inf.baseVec[s] += ef.value;
-          if (e === 0) { inf.commonIdx = s; inf.commonVal = ef.value; }
-        } else inf.baseVec[s] += 1;
-      }
-    }
-    return inf;
-  }
-
-  // Give stickers with the same gameplay definition a shared signature.
-  // Their generated names/counters are intentionally excluded, so identical
-  // copies can be treated as interchangeable by the search.
-  function stickerSignature(si) {
-    var d = stickers[si];
-    var cells = d.cells.map(function (c) { return [c[0], c[1]]; })
-      .sort(function (a, b) { return a[1] - b[1] || a[0] - b[0]; });
-    var effects = (d.effects || []).map(function (e) {
-      return { stat: e.stat, value: e.value };
-    });
-    return JSON.stringify({
-      cells: cells,
-      rarity: d.rarity,
-      isLamp: !!d.isLamp,
-      effects: effects,
-      lampBoost: d.isLamp ? d.lampBoost : 0
-    });
-  }
-
-  var infos = {}, sigBySi = {}, firstSeen = {}, sigCount = {}, nSeen = 0;
-  input.instances.forEach(function (si) {
-    firstSeen[si] = nSeen++;
-    var sig = stickerSignature(si);
-    sigBySi[si] = sig;
-    sigCount[sig] = (sigCount[sig] || 0) + 1;
-    if (!infos[sig]) infos[sig] = buildInfo(si);
-  });
-
-  // ---- board symmetry: apply it only through a sticker with no duplicate ----
-  // A duplicate group has no distinguished member, so "first placed" symmetry
-  // pruning can accidentally remove valid layouts after the copies are reordered.
-  // Anchor symmetry to one selected sticker whose signature occurs exactly once.
-  var symmetryAnchor = -1;
-  input.instances.forEach(function (si) {
-    if (symmetryAnchor < 0 && sigCount[sigBySi[si]] === 1) symmetryAnchor = si;
-  });
-
-  // rot180 always; flips only if every selected shape is mirror-closed.
-  var allAchiral = Object.keys(infos).every(function (k) { return infos[k].achiral; });
-  function mapMask(m, fx, fy) {
-    var r = 0;
-    for (var c = 0; c < N * H; c++) if (m & (1 << c)) {
-      var x = c % N, y = (c - x) / N;
-      r |= 1 << ((fy ? H - 1 - y : y) * N + (fx ? N - 1 - x : x));
-    }
-    return r;
-  }
-  var syms = [];
-  if (symmetryAnchor >= 0) {
-    [[1, 1], [1, 0], [0, 1]].forEach(function (t) {
-      if (!(t[0] && t[1]) && !allAchiral) return;
-      if (mapMask(avail, t[0], t[1]) === avail) syms.push(t);
-    });
-  }
-  function canon(mask) {
-    for (var s = 0; s < syms.length; s++) if (mapMask(mask, syms[s][0], syms[s][1]) < mask) return false;
-    return true;
-  }
-
-  var nPlaced = 0;
-
-  var lampList = input.instances.filter(function (si) { return stickers[si].isLamp; })
-    .sort(function (a, b) { return firstSeen[a] - firstSeen[b]; });
-  var otherList = input.instances.filter(function (si) { return !stickers[si].isLamp; })
-    .sort(function (a, b) { return stickers[b].cells.length - stickers[a].cells.length || firstSeen[a] - firstSeen[b]; });
-
-  function prevSame(list) {
-    var last = {};
-    return list.map(function (si, i) {
-      var key = sigBySi[si];
-      var p = last[key] === undefined ? -1 : last[key];
-      last[key] = i;
-      return p;
-    });
-  }
-  var lampInfo = lampList.map(function (si) { return infos[sigBySi[si]]; });
-  var otherInfo = otherList.map(function (si) { return infos[sigBySi[si]]; });
-  var lampPrev = prevSame(lampList), otherPrev = prevSame(otherList);
-  var distinctOthers = [];
-  otherInfo.forEach(function (inf) { if (distinctOthers.indexOf(inf) < 0) distinctOthers.push(inf); });
-
-  var L = lampInfo.length, O = otherInfo.length;
-  var lampChosen = new Array(L).fill(null), lampChosenIdx = new Array(L).fill(-1), lampEff = new Array(L).fill(0);
-  var otherChosen = new Array(O).fill(null), otherChosenIdx = new Array(O).fill(-1);
-  var stack = [];
-  for (var q = 0; q <= O; q++) stack.push(new Float64Array(S));
-  var upperBound = new Float64Array(S);
-  var suffixSize = new Array(O + 1).fill(0);
-  for (var q2 = O - 1; q2 >= 0; q2--) suffixSize[q2] = suffixSize[q2 + 1] + otherInfo[q2].size;
-
-  var sols = [], nodes = 0, stop = false, truncated = false;
-  function halt() { if (stop) return true; if (++nodes > maxNodes) { stop = true; truncated = true; return true; } return false; }
-
-  // Recompute the best possible finish against the cells that are still free.
-  // Each remaining sticker contributes its base stats plus the best Glow Up
-  // factor from a placement that does not overlap occ. If no placement remains,
-  // the sticker contributes nothing unless requireAll makes the branch impossible.
-  function dominated(cur, i, occ) {
-    for (var k = 0; k < S; k++) upperBound[k] = cur[k];
-
-    for (var j = i; j < O; j++) {
-      var inf = otherInfo[j], cands = inf.cands, best = null;
-      for (var c = 0; c < cands.length; c++) {
-        if (!(cands[c].pl.mask & occ)) { best = cands[c]; break; }
-      }
-
-      if (!best) {
-        if (requireAll) return true;
-        continue;
-      }
-
-      for (var k2 = 0; k2 < S; k2++) upperBound[k2] += inf.baseVec[k2];
-      if (inf.commonIdx >= 0) upperBound[inf.commonIdx] += inf.commonVal * best.factor;
-    }
-
-    for (var a = 0; a < sols.length; a++) {
-      var m = sols[a].vec, ge = true;
-      for (var k3 = 0; k3 < S; k3++) if (m[k3] < upperBound[k3] - EPS) { ge = false; break; }
-      if (ge) return true;
-    }
-    return false;
-  }
-
-  function build(v) {
-    var s = { placed: [], totals: {}, commonTotals: {}, descriptive: {}, vec: Array.prototype.slice.call(v) };
-    lampInfo.forEach(function (inf, i) {
-      if (lampChosen[i]) s.placed.push({ sticker: lampList[i], cells: lampChosen[i].cells.slice(), lampBoost: lampEff[i], multiplier: 1, commonValue: 0 });
-    });
-    otherInfo.forEach(function (inf, i) {
-      var c = otherChosen[i]; if (!c) return;
-      var mult = 1 + c.factor;
-      var p = { sticker: otherList[i], cells: c.pl.cells.slice(), multiplier: mult, commonValue: inf.commonVal * mult, lampBoost: 0 };
-      s.placed.push(p);
-      if (inf.commonIdx >= 0) { var n = stats[inf.commonIdx].name; s.commonTotals[n] = (s.commonTotals[n] || 0) + p.commonValue; }
-    });
-    for (var k = 0; k < S; k++) {
-      if (v[k] <= EPS) continue;
-      if (stats[k].numerical) s.totals[stats[k].name] = v[k]; else s.descriptive[stats[k].name] = Math.round(v[k]);
-    }
-    var vals = Object.keys(s.commonTotals).map(function (n) { return s.commonTotals[n]; });
-    s.balance = vals.reduce(function (a, b) { return a + b; }, 0);
-    s.highestStat = vals.length ? Math.max.apply(null, vals) : 0;
-    s.raritySum = s.placed.reduce(function (a, p) { return a + stickers[p.sticker].rarity; }, 0);
-    s.epicCount = s.placed.reduce(function (a, p) { return a + (stickers[p.sticker].rarity === 3 ? 1 : 0); }, 0);
-    s.rareCount = s.placed.reduce(function (a, p) { return a + (stickers[p.sticker].rarity === 2 ? 1 : 0); }, 0);
-    s.commonCount = s.placed.reduce(function (a, p) { return a + (stickers[p.sticker].rarity === 1 ? 1 : 0); }, 0);
-    return s;
-  }
-
-  function record(v) {
-    for (var a = sols.length - 1; a >= 0; a--) {
-      var m = sols[a].vec, vGeM = true;
-      for (var k = 0; k < S; k++) if (v[k] < m[k] - EPS) { vGeM = false; break; }
-      if (vGeM) sols.splice(a, 1);
-    }
-    sols.push(build(v));
-    if (sols.length >= maxSolutions) { truncated = true; stop = true; }
-  }
-
-  function dfs2(i, occ, cur) {
-    if (halt()) return;
-    if (dominated(cur, i, occ)) return;
-    if (i === O) { record(cur); return; }
-    if (requireAll && popcount(avail & ~occ) < suffixSize[i]) return;
-    var inf = otherInfo[i], prev = otherPrev[i], start = 0, mustSkip = false;
-    if (prev >= 0) { if (otherChosen[prev] === null) mustSkip = true; else start = otherChosenIdx[prev] + 1; }
-    if (!mustSkip) {
-      var cands = inf.cands;
-      for (var k = start; k < cands.length; k++) {
-        var c = cands[k];
-        if (c.pl.mask & occ) continue;
-        if (otherList[i] === symmetryAnchor && !canon(c.pl.mask)) continue;
-        var next = stack[i + 1];
-        for (var q = 0; q < S; q++) next[q] = cur[q] + inf.baseVec[q];
-        if (inf.commonIdx >= 0) next[inf.commonIdx] += inf.commonVal * c.factor;
-        otherChosen[i] = c; otherChosenIdx[i] = k;
-        nPlaced++;
-        dfs2(i + 1, occ | c.pl.mask, next);
-        nPlaced--;
-        if (stop) { otherChosen[i] = null; return; }
-      }
-    }
-    if (!requireAll) { otherChosen[i] = null; otherChosenIdx[i] = -1; dfs2(i + 1, occ, cur); }
-    otherChosen[i] = null;
-  }
-
-  function stage2(occ) {
-    nodes += 20;
-    var placed = [];
-    for (var i = 0; i < L; i++) if (lampChosen[i]) placed.push(i);
-    var m = placed.length;
-
-    // A Glow Up contributes its boost to another Glow Up at most once, even if
-    // their 1x2 shapes touch along multiple cells.
-    for (var a = 0; a < m; a++) {
-      var ia = placed[a], e = stickers[lampInfo[ia].si].lampBoost;
-      for (var b = 0; b < m; b++) {
-        if (a === b) continue;
-        var ib = placed[b];
-        if (lampChosen[ia].mask & lampChosen[ib].range) {
-          e += stickers[lampInfo[ib].si].lampBoost;
-        }
-      }
-      lampEff[ia] = e;
-    }
-
-    distinctOthers.forEach(function (inf) {
-      var list = [];
-      inf.pls.forEach(function (pl) {
-        if (pl.mask & occ) return;
-
-        // Evaluate each placed Glow Up exactly once. The bitmask intersection
-        // means touching two cells of the same Glow Up still gives one boost.
-        var f = 0;
-        for (var a2 = 0; a2 < m; a2++) {
-          var li = placed[a2];
-          if (pl.mask & lampChosen[li].range) f += lampEff[li] / 100;
-        }
-        list.push({ pl: pl, factor: f, ord: list.length });
-      });
-      list.sort(function (x, y) { return y.factor - x.factor || x.ord - y.ord; });
-      inf.cands = list;
-    });
-    stack[0].fill(0);
-    dfs2(0, occ, stack[0]);
-  }
-
-  // Glow Ups are always placed first (before any other sticker), and the
-  // "place it" branches are explored before the "skip it" branch.
-  function lampDfs(i, occ) {
-    if (halt()) return;
-    if (i === L) { stage2(occ); return; }
-    var inf = lampInfo[i], prev = lampPrev[i], start = 0, mustSkip = false;
-    if (prev >= 0) { if (lampChosen[prev] === null) mustSkip = true; else start = lampChosenIdx[prev] + 1; }
-    if (!mustSkip) {
-      for (var k = start; k < inf.pls.length; k++) {
-        var pl = inf.pls[k];
-        if (pl.mask & occ) continue;
-        if (lampList[i] === symmetryAnchor && !canon(pl.mask)) continue;
-        lampChosen[i] = pl; lampChosenIdx[i] = k;
-        nPlaced++;
-        lampDfs(i + 1, occ | pl.mask);
-        nPlaced--;
-        if (stop) { lampChosen[i] = null; return; }
-      }
-    }
-    if (!requireAll) { lampChosen[i] = null; lampChosenIdx[i] = -1; lampDfs(i + 1, occ); }
-    lampChosen[i] = null;
-  }
-
-  lampDfs(0, 0);
-  return { solutions: sols, truncated: truncated, nodes: nodes };
-}
-</script>
-
-<!-- ================= APP ================= -->
+<script src="stickers.js"></script>
+<script src="solver.js"></script>
 <script>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
-  var SRC = $('solver').textContent;
-  var solveFn = new Function(SRC + '\nreturn solve;')();
-  var RAR = ['Common', 'Rare', 'Epic'], KEY = 'stickersheetV3';
+  var RAR = ['Common', 'Rare', 'Epic'], TIERS = ['rare', 'epic'], KEY = 'stickersheetV3';
   var SORTS = ['Overall Best', 'Highest Stats', 'Balance', 'Highest Rarity'];
 
-  var COMMON_STATS = [
-    'Hero Damage', 'Hero Pierce', 'Hero Attack Speed', 'Blop Value',
-    'Hero Crit Chance', 'Collection Range', 'Hero Knockback', 'Luck',
-    'More Gold', 'Immunity Duration', 'Evasion', 'Encounter Duration', 'Effectiveness'
-  ];
-
-  // ---------- premade stickers ----------
-  function sh(rows) {
-    var c = [];
-    rows.forEach(function (r, y) { for (var x = 0; x < r.length; x++) if (r.charAt(x) === 'X') c.push([x, y]); });
-    return c;
+  // ---------- sticker data (from stickers.js) ----------
+  // '{20}% Primary Monkey Attack Speed' -> stacking effect { text: '{v}% Primary Monkey Attack Speed', value: 20 }
+  function parseEffect(str) {
+    var m = /\{(-?[\d.]+)\}/.exec(str);
+    return m ? { text: str.replace(m[0], '{v}'), value: parseFloat(m[1]), stack: true } : { text: str, value: 0, stack: false };
   }
-  function box(w, h) { var r = []; for (var i = 0; i < h; i++) r.push(new Array(w + 1).join('X')); return r; }
-  function P(name, rows, common, rare, epic) { return { name: name, cells: sh(rows), common: common, effects: [rare, epic] }; }
-
-  var PRESETS = [
-    P('Retro Flair', box(2, 2), 'Collection Range', '10% Blop Value', 'Blops deal 1 damage to any Bloon they touch while being collected'),
-    P('Pop Pop Pop!', box(3, 2), 'Hero Pierce', '30% Movement Speed if all monkeys in the team are the same type', '30% Team Pierce if all monkeys in the team are Primary'),
-    P('Pow Pow Pow!', box(3, 2), 'Hero Damage', '30% Movement Speed if all monkeys in the team are the same type', '30% Team Damage if all monkeys in the team are Military'),
-    P('Pew Pew Pew!', box(3, 2), 'Hero Attack Speed', '30% Movement Speed if all monkeys in the team are the same type', '30% Team Attack Speed if all monkeys in the team are Magic'),
-    P('Ready to Rumble', box(2, 2), 'Hero Knockback', '5% chance to stun Bloons for 1s when they are hit with a knockback force of 3 or more from the hero', '+10% to stun chance'),
-    P('Retro Style', ['XXX', 'XOX'], 'Luck', '20 additional Blops spawn at the beginning of the stage', '30 additional Blops spawn at the beginning of the stage'),
-    P('Can\'t Hide', ['XXX', 'XX'], 'Hero Pierce', 'Hero attacks have a 20% chance to stun Shield Bloons for 1 second', 'Hero attacks have a 20% chance to pass through shields'),
-    P('Green Thumb', ['XXX', 'OXX'], 'Hero Attack Speed', '20% Hero Crit Chance vs Regrow Bloons', 'Hero has a 20% chance to prevent Bloons from regrowing for 1,000% seconds on hit'),
-    P('Ol\' Faithful', ['X', 'XX'], 'Hero Pierce', '20% Primary Monkey Pierce', '10% size to glaives with Honed Edges'),
-    P('Glitter and Gold', ['XXX', 'OXO'], 'Blop Value', '10% chance of getting a Primary Monkey when rolling new monkeys', '10% to Primary Monkey chance'),
-    P('Fist of Furry', box(3, 1), 'Hero Damage', '20% Primary Monkey Damage', '10% Knockback to Boomerangs with Heavy Metal'),
-    P('Wheely Fast', ['X', 'XX'], 'Hero Attack Speed', '20% Primary Monkey Attack Speed', '+2 Tacks from Even More Tacks'),
-    P('Off On An Adventure', box(3, 3), 'More Gold', 'Bags and Chests drop 10% more Gold Coins', 'Bags and Chests drop 20% more Gold Coins'),
-    P('Badge of the Marksman', box(3, 1), 'Hero Pierce', '20% Military Monkey Pierce', 'Increase Explosion size by 10% for Direct Hit'),
-    P('Ranking Officer', ['XXX', 'OXO'], 'Blop Value', '10% chance of getting a Military Monkey when rolling new monkeys', '10% to Military Monkey chance'),
-    P('Badge of Valor', ['X', 'XX'], 'Hero Damage', '20% Military Monkey Damage', '+5% Vulnerability Damage from Anti-Material Rounds'),
-    P('Sergeants Stripes', ['X', 'XX'], 'Hero Attack Speed', '20% Military Monkey Attack Speed', '+1 shot per burst to Burst Fire'),
-    P('A Little Magic', ['X', 'XX'], 'Hero Pierce', '20% Magic Monkey Pierce', 'Bulky Potions are 10% larger'),
-    P('Magical Moxie', ['XXX', 'OXO'], 'Blop Value', '10% chance of getting a Magic Monkey when rolling new monkeys', '10% to Magic Monkey chance'),
-    P('Lightning Bolt', ['X', 'XX'], 'Hero Damage', '20% Magic Monkey Damage', 'Increase Dark Magic cap by 5'),
-    P('Haste Spell', box(3, 1), 'Hero Attack Speed', '20% Magic Monkey Attack Speed', 'Increase duration of Stronger Acid by 10%'),
-    P('Feeling Lucky', ['XXXXX', 'X', 'XX'], 'Luck', 'Start with 1 Temp HP', 'You can have 1 additional Temp HP at a time'),
-    P('Pretty Fly For a Cacti', ['X', 'XX', 'XXX'], 'Hero Knockback', 'Hero knocks Bloons back 1m when Immune', 'Hero deals 10 damage to each Bloon touched when Immune'),
-    P('That Prickles', ['X', 'XX', 'XXX'], 'Immunity Duration', 'Hero knocks Bloons back 1m when Immune', 'Hero deals 10 damage to each Bloon touched when Immune'),
-    P('Well Warned', ['OXO', 'XXX', 'OXO'], 'Hero Crit Chance', 'Hero critical hits have a 1% chance to Heal 1 once per milestone', '+0.04 to Heal chance'),
-    P('Tough Road Ahead', box(4, 2), 'Blop Value', 'Heal 1 HP on level up', 'Heal 1 more HP on level up'),
-    P('Retro Pizazz', box(2, 1), 'Hero Crit Chance', '100% Hero Crit Damage', 'Bloons popped by a Crit from the hero have a 20% chance to drop x2 Blops'),
-    P('Nick of Time', ['OOX', 'XXXX', 'OOX'], 'Evasion', 'Deal 3,000% damage to the attacking Bloon after a successful dodge', '100% movement speed for 3 seconds on a successful dodge'),
-    P('The Friendly Bloon', ['OXXX', 'OXX', 'XXX'], 'Blop Value', 'Gain 50% Blop Value during boss fights', 'Gain 50% Luck during boss fights'),
-    P('Ultimate Showdown', ['OXXO', 'XXXX'], 'Hero Damage', '20% Hero Boss Damage', 'Hero gains 50% Attack Speed for 10 seconds when a boss fight starts'),
-    { name: 'Glow Up', lamp: true, common: 'Effectiveness', cells: [[0, 0], [1, 0]], effects: ['Vertically adjacent stickers also get the boost', 'Diagonally adjacent stickers also get the boost'] },
-    P('The Wise Frog', box(1, 2), 'Encounter Duration', 'Encounter takes 20% less time to activate (minimum 0.5s)', 'Activating an encounter also gives 5,000% Blops')
-  ];
+  var PRESETS = STICKERS.map(function (s) {
+    var cells = [];
+    s.shape.forEach(function (r, y) { for (var x = 0; x < r.length; x++) if (r.charAt(x) === 'X') cells.push([x, y]); });
+    return { name: s.name, base: s.base, lamp: s.base === 'Effectiveness', cells: cells, tiers: [parseEffect(s.rare), parseEffect(s.epic)] };
+  });
   function preset(name) { return PRESETS.filter(function (p) { return p.name === name; })[0]; }
+  // Solver stat name -> parsed effect, e.g. 'Wheely Fast|rare'. Keyed per sticker, so only the exact same sticker stacks.
+  var EFFECTS = {};
+  PRESETS.forEach(function (p) { p.tiers.forEach(function (t, i) { EFFECTS[p.name + '|' + TIERS[i]] = t; }); });
 
-  var state = { stickers: [], sheet: Array(30).fill(true), counters: {} };
+  var state = { stickers: [], sheet: Array(30).fill(true), counters: {}, statPriority: [] };
   try {
     var saved = JSON.parse(localStorage.getItem(KEY));
     if (saved && saved.stickers) {
@@ -459,6 +100,45 @@ function solve(input) {
       state.counters = saved.counters || {};
     }
   } catch (e) {}
+  // Saved stickers keep only type / rarity / value; shape and effects always come from stickers.js.
+  state.stickers = state.stickers.filter(function (s) {
+    if (!preset(s.type)) { console.warn('Dropped saved sticker with unknown type: ' + s.type); return false; }
+    if (s.value === undefined) s.value = s.isLamp ? s.lampBoost : s.effects[0].value;
+    return true;
+  });
+  function baseStats() {
+    var seen = {};
+    var out = [];
+    state.stickers.forEach(function (s) {
+      var p = preset(s.type);
+      if (!p || p.lamp || p.base === 'Effectiveness' || seen[p.base]) return;
+      seen[p.base] = true;
+      out.push(p.base);
+    });
+    return out;
+  }
+
+  // Preserve the user's existing order, append newly encountered base stats,
+  // and remove stats no longer represented by any sticker.
+  function normalizeStatPriority() {
+    var available = baseStats(), seen = {};
+    var ordered = [];
+    (state.statPriority || []).forEach(function (n) {
+      if (available.indexOf(n) >= 0 && !seen[n]) {
+        seen[n] = true;
+        ordered.push(n);
+      }
+    });
+    available.forEach(function (n) {
+      if (!seen[n]) {
+        seen[n] = true;
+        ordered.push(n);
+      }
+    });
+    state.statPriority = ordered;
+  }
+  normalizeStatPriority();
+
   var form = { type: '', rarity: 1, val: '' };
   var opts = { requireAll: false };
   var worker = null, solving = false, results = [], sortMode = 0, sel = 0, statusMsg = '';
@@ -466,13 +146,28 @@ function solve(input) {
   function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function fmt(v) { return String(Math.round(v * 100) / 100); }
+  function num(v) { return v.toLocaleString('en-US', { maximumFractionDigits: 2 }); }
   function setStatus(m) { statusMsg = m; $('status').textContent = m; }
   function color(p, i) { return p.def.isLamp ? '#ffe066' : 'hsl(' + ((i * 114.5) % 360) + ',55%,72%)'; }
 
   function statText(name, v) { return fmt(v) + '% ' + name; }
-  function effectsText(d) {
-    if (d.isLamp) return [fmt(d.lampBoost) + '% Effectiveness'].concat(preset('Glow Up').effects.slice(0, d.rarity - 1)).join(', ');
-    return d.effects.slice(0, d.rarity).map(function (e, i) { return i === 0 ? fmt(e.value) + '% ' + e.stat : e.stat; }).join(', ');
+  // total = summed number for stacking effects, copy count for the others
+  function tierText(t, total) { return t.stack ? t.text.replace('{v}', num(total)) : t.text + (total > 1 ? ' x' + total : ''); }
+  function tierOne(t) { return tierText(t, t.stack ? t.value : 1); }
+  function effectsText(s) {
+    var p = preset(s.type);
+    return [fmt(s.value) + '% ' + p.base].concat(p.tiers.slice(0, s.rarity - 1).map(tierOne)).join(', ');
+  }
+
+  // Sticker as the solver wants it, built from the saved sticker plus stickers.js
+  function solverDef(s) {
+    var p = preset(s.type);
+    var d = { name: s.name, rarity: s.rarity, isLamp: p.lamp, cells: p.cells, effects: [], lampBoost: p.lamp ? s.value : 0 };
+    if (!p.lamp) {
+      d.effects.push({ stat: p.base, value: s.value });
+      for (var i = 0; i < s.rarity - 1; i++) d.effects.push({ stat: p.name + '|' + TIERS[i], value: p.tiers[i].value });
+    }
+    return d;
   }
 
   // ---------- renderers ----------
@@ -483,9 +178,9 @@ function solve(input) {
     }).join('') + '</select>' +
       '<div class="seg">' + RAR.map(function (r, i) { return '<button data-a="formRarity" data-v="' + (i + 1) + '" class="' + (form.rarity === i + 1 ? 'on' : '') + '">' + r + '</button>'; }).join('') + '</div>';
     if (p) {
-      h += '<div class="row"><small>' + esc(p.common) + ' %</small><input type="number" step="any" min="0" data-bind="val" style="width:90px" value="' + esc(form.val) + '"></div>';
-      if (p.effects && form.rarity >= 2) {
-        h += '<ul class="fx">' + p.effects.slice(0, form.rarity - 1).map(function (t) { return '<li><small>' + esc(t) + '</small></li>'; }).join('') + '</ul>';
+      h += '<div class="row"><small>' + esc(p.base) + ' %</small><input type="number" step="any" min="0" data-bind="val" style="width:90px" value="' + esc(form.val) + '"></div>';
+      if (form.rarity >= 2) {
+        h += '<ul class="fx">' + p.tiers.slice(0, form.rarity - 1).map(function (t) { return '<li><small>' + esc(tierOne(t)) + '</small></li>'; }).join('') + '</ul>';
       }
     }
     h += '<button class="primary" data-a="createSticker">Create sticker</button>';
@@ -500,19 +195,47 @@ function solve(input) {
 
   function renderStickers() {
     $('stickers').innerHTML = state.stickers.length ? state.stickers.map(function (s, i) {
+      var p = preset(s.type);
       return '<div class="row"><label class="chk" style="margin:0"><input type="checkbox" data-a="toggle" data-i="' + i + '"' + (s.include ? ' checked' : '') + '>' +
-             '<div><div>' + esc(s.name) + ' <small>(' + (s.isLamp ? 'Glow Up ' : '') + RAR[s.rarity - 1] + ', ' + s.cells.length + ' sq)</small></div><small>' + esc(effectsText(s)) + '</small></div></label>' +
+             '<div><div>' + esc(s.name) + ' <small>(' + (p.lamp ? 'Glow Up ' : '') + RAR[s.rarity - 1] + ', ' + p.cells.length + ' sq)</small></div><small>' + esc(effectsText(s)) + '</small></div></label>' +
              '<button class="danger" data-a="delSticker" data-i="' + i + '">×</button></div>';
     }).join('') : '<small>None yet.</small>';
+    var priorities = state.statPriority || [];
+    var priorityHtml = priorities.length
+      ? '<ul id="priority-list" class="priority-list">' + priorities.map(function (name, i) {
+          return '<li class="priority-item" draggable="true" data-priority="' + esc(name) + '" data-priority-index="' + i + '">' +
+            '<span class="priority-handle">&#9776;</span><span class="priority-rank">#' + (i + 1) + '</span><span>' + esc(name) + '</span></li>';
+        }).join('') + '</ul>'
+      : '<small>No base common stats yet.</small>';
+
     $('opts').innerHTML =
+      '<h2>Highest Stats priority</h2>' +
+      '<small>Drag stats to choose the order optimized by Highest Stats. Effectiveness is excluded because Glow Ups boost other stats.</small>' +
+      priorityHtml +
       '<label class="chk"><input type="checkbox" data-bind="req"' + (opts.requireAll ? ' checked' : '') + '> Every selected sticker must be placed</label>' +
       (solving ? '<button class="primary" data-a="cancel" style="background:#e5645b;border-color:#e5645b">Cancel</button>' : '<button class="primary" data-a="solve">SOLVE</button>');
   }
 
+  function statValue(s, name) {
+    return s.totals[name] || 0;
+  }
+
+  // Highest Stats is a lexicographic objective: #1 is maximized first,
+  // then #2 only breaks ties, and so on.
+  function highestStatsCompare(a, b) {
+    var priority = state.statPriority || [];
+    for (var i = 0; i < priority.length; i++) {
+      var av = statValue(a, priority[i]), bv = statValue(b, priority[i]);
+      if (Math.abs(av - bv) > 1e-4) return bv - av;
+    }
+    return b.balance - a.balance || b.highestStat - a.highestStat || b.raritySum - a.raritySum;
+  }
+
   var CMP = [
-    function (a, b) { return b.highestStat - a.highestStat || b.balance - a.balance || b.raritySum - a.raritySum; },
+    highestStatsCompare,
     function (a, b) { return b.balance - a.balance || b.highestStat - a.highestStat || b.raritySum - a.raritySum; },
-    function (a, b) { return b.epicCount - a.epicCount || b.rareCount - a.rareCount || b.commonCount - a.commonCount; }
+    // Highest Rarity: ties fall back to the Highest Stats ordering (stat priority list).
+    function (a, b) { return b.epicCount - a.epicCount || b.rareCount - a.rareCount || b.commonCount - a.commonCount || highestStatsCompare(a, b); }
   ];
 
   // Overall Best: sum of each solve's placement in the three categories (lowest total wins)
@@ -523,13 +246,17 @@ function solve(input) {
 
   function sorted() {
     var r = results.slice();
-    r.sort(sortMode === 0 ? function (a, b) { return b.score - a.score || CMP[0](a, b); } : CMP[sortMode - 1]);
+    r.sort(sortMode === 0
+      ? function (a, b) { return b.score - a.score || CMP[0](a, b); }
+      : CMP[sortMode - 1]);
     return r.slice(0, 10);
   }
 
   function summary(s) {
-    var parts = Object.keys(s.totals).map(function (n) { return statText(n, s.totals[n]); })
-      .concat(Object.keys(s.descriptive).map(function (n) { return n + (s.descriptive[n] > 1 ? ' x' + s.descriptive[n] : ''); }));
+    var parts = Object.keys(s.totals).concat(Object.keys(s.descriptive)).map(function (n) {
+      var v = n in s.totals ? s.totals[n] : s.descriptive[n];
+      return EFFECTS[n] ? tierText(EFFECTS[n], v) : statText(n, v);
+    });
     return (parts.join('  |  ') || '(no stats)') + '\nBalance ' + fmt(s.balance) + '   Top stat ' + fmt(s.highestStat) + '   Rarity ' + s.raritySum + '   Stickers ' + s.placed.length;
   }
 
@@ -537,7 +264,7 @@ function solve(input) {
     var d = p.def;
     if (d.isLamp) return d.name + ' [' + RAR[d.rarity - 1] + ' Glow Up]: ' + fmt(p.lampBoost) + '% Effectiveness';
     return d.name + ' [' + RAR[d.rarity - 1] + ']: ' + d.effects.slice(0, d.rarity).map(function (e, i) {
-      if (i > 0) return e.stat;
+      if (i > 0) return tierOne(EFFECTS[e.stat]);
       var t = fmt(p.commonValue) + '% ' + e.stat;
       if (p.multiplier > 1.0001) t += ' (base ' + fmt(e.value) + ', x' + fmt(p.multiplier) + ' from Glow Ups)';
       return t;
@@ -571,18 +298,11 @@ function solve(input) {
     var p = preset(form.type);
     if (!p) return setStatus('Pick a sticker first.');
     var v = parseFloat(form.val);
-    var st = { type: p.name, rarity: form.rarity, isLamp: !!p.lamp, cells: p.cells.map(function (c) { return [c[0], c[1]]; }), effects: [], lampBoost: 10, include: true };
-    if (p.lamp) {
-      if (!(v > 0)) return setStatus('Effectiveness must be a number above 0.');
-      st.lampBoost = v;
-    } else {
-      if (!(v >= 0)) return setStatus('Enter the ' + p.common + ' % value (0 or more).');
-      st.effects.push({ stat: p.common, value: v });
-      for (var i = 0; i < form.rarity - 1; i++) st.effects.push({ stat: p.effects[i], value: 0 });
-    }
+    if (p.lamp) { if (!(v > 0)) return setStatus('Effectiveness must be a number above 0.'); }
+    else if (!(v >= 0)) return setStatus('Enter the ' + p.base + ' % value (0 or more).');
     state.counters[p.name] = (state.counters[p.name] || 0) + 1;
-    st.name = p.name + ' ' + state.counters[p.name];
-    state.stickers.push(st); form.val = ''; save(); renderAll(); setStatus('Created sticker \'' + st.name + '\'.');
+    var st = { type: p.name, rarity: form.rarity, value: v, include: true, name: p.name + ' ' + state.counters[p.name] };
+    state.stickers.push(st); normalizeStatPriority(); form.val = ''; save(); renderAll(); setStatus('Created sticker \'' + st.name + '\'.');
   }
 
   function finish(res) {
@@ -599,17 +319,34 @@ function solve(input) {
     var instances = [];
     state.stickers.forEach(function (s, i) { if (s.include) instances.push(i); });
     if (!instances.length) return setStatus('Select at least one sticker to place.');
-    lastStickers = state.stickers.slice();
-    var stats = COMMON_STATS.map(function (n) { return { name: n, numerical: true }; }), seen = {};
-    state.stickers.forEach(function (st) {
-      st.effects.forEach(function (e, k) { if (k > 0 && !seen[e.stat]) { seen[e.stat] = 1; stats.push({ name: e.stat, numerical: false }); } });
+    lastStickers = state.stickers.map(solverDef);
+    // Base common stats are the optimization dimensions. Rare/epic effects
+    // are still sent to the solver and accumulated for display, but do not
+    // create extra Pareto dimensions.
+    var stats = [], seen = {};
+    instances.forEach(function (i) {
+      lastStickers[i].effects.forEach(function (e, k) {
+        if (seen[e.stat]) return;
+        seen[e.stat] = 1;
+        stats.push({
+          name: e.stat,
+          numerical: k === 0 || EFFECTS[e.stat].stack,
+          optimize: k === 0
+        });
+      });
     });
-    var input = JSON.parse(JSON.stringify({ stats: stats, stickers: state.stickers, sheet: state.sheet, instances: instances, requireAll: opts.requireAll }));
+    var input = JSON.parse(JSON.stringify({
+      stats: stats,
+      stickers: lastStickers,
+      sheet: state.sheet,
+      instances: instances,
+      requireAll: opts.requireAll
+    }));
     results = []; solving = true; setStatus('Solving...'); renderAll();
-    var runSync = function () { setTimeout(function () { finish(solveFn(input)); }, 20); };
+    var runSync = function () { setTimeout(function () { finish(solve(input)); }, 20); };
     if (typeof Worker === 'undefined') return runSync();
     try {
-      worker = new Worker(URL.createObjectURL(new Blob([SRC + '\nself.onmessage=function(e){self.postMessage(solve(e.data));};'], { type: 'text/javascript' })));
+      worker = new Worker(URL.createObjectURL(new Blob(['var solve=' + solve.toString() + ';self.onmessage=function(e){self.postMessage(solve(e.data));};'], { type: 'text/javascript' })));
       worker.onmessage = function (e) { finish(e.data); };
       worker.onerror = function () { worker = null; runSync(); };
       worker.postMessage(input);
@@ -623,7 +360,7 @@ function solve(input) {
     else if (a === 'sheet') { state.sheet[i] = !state.sheet[i]; save(); rendersheet(); }
     else if (a === 'sheetAll') { state.sheet = Array(30).fill(true); save(); rendersheet(); }
     else if (a === 'toggle') { state.stickers[i].include = !state.stickers[i].include; save(); renderStickers(); }
-    else if (a === 'delSticker') { state.stickers.splice(i, 1); save(); renderAll(); }
+    else if (a === 'delSticker') { state.stickers.splice(i, 1); normalizeStatPriority(); save(); renderAll(); }
     else if (a === 'solve') startSolve();
     else if (a === 'cancel') { if (worker) worker.terminate(); worker = null; solving = false; setStatus('Cancelled.'); renderStickers(); }
     else if (a === 'sort') { sortMode = +v; sel = 0; renderResults(); }
@@ -637,6 +374,189 @@ function solve(input) {
     else if (b === 'val') form.val = t.value;
     else if (b === 'req') opts.requireAll = t.checked;
   }
+
+  var draggedPriority = null;
+  var draggedPriorityItem = null;
+  var draggedPriorityClone = null;
+  var dragOffsetY = 0;
+  var dragCurrentY = 0;
+  var dragPointerId = null;
+
+  function updatePriorityRanks() {
+    document.querySelectorAll('#priority-list .priority-item').forEach(function (item, i) {
+      var rank = item.querySelector('.priority-rank');
+      if (rank) rank.textContent = '#' + (i + 1);
+    });
+  }
+
+  function priorityOrderFromDom() {
+    return Array.prototype.slice.call(document.querySelectorAll('#priority-list .priority-item'))
+      .map(function (item) { return item.dataset.priority; });
+  }
+
+  function animatePriorityMove(dragged, target, before) {
+    var list = $('priority-list');
+    if (!list || !dragged || !target || dragged === target) return false;
+
+    var items = Array.prototype.slice.call(list.querySelectorAll('.priority-item'));
+    var first = new Map();
+    items.forEach(function (item) { first.set(item, item.getBoundingClientRect()); });
+
+    if (before) list.insertBefore(dragged, target);
+    else list.insertBefore(dragged, target.nextSibling);
+
+    var moved = false;
+    items.forEach(function (item) {
+      if (item === dragged) return;
+      var oldRect = first.get(item);
+      var newRect = item.getBoundingClientRect();
+      var dy = oldRect.top - newRect.top;
+
+      if (Math.abs(dy) > 0.5) {
+        moved = true;
+        item.style.transition = 'none';
+        item.style.transform = 'translateY(' + dy + 'px)';
+        requestAnimationFrame(function () {
+          item.style.transition = 'transform 160ms ease';
+          item.style.transform = '';
+        });
+      }
+    });
+
+    updatePriorityRanks();
+    if (draggedPriorityClone) {
+      var draggedIndex = Array.prototype.indexOf.call(list.querySelectorAll('.priority-item'), dragged);
+      var cloneRank = draggedPriorityClone.querySelector('.priority-rank');
+      if (cloneRank && draggedIndex >= 0) cloneRank.textContent = '#' + (draggedIndex + 1);
+    }
+    return moved;
+  }
+
+  function createPriorityDragClone(item) {
+    var rect = item.getBoundingClientRect();
+    var clone = item.cloneNode(true);
+    clone.classList.add('priority-drag-clone');
+    clone.removeAttribute('draggable');
+    clone.style.position = 'fixed';
+    clone.style.left = rect.left + 'px';
+    clone.style.top = rect.top + 'px';
+    clone.style.width = rect.width + 'px';
+    clone.style.height = rect.height + 'px';
+    clone.style.margin = getComputedStyle(item).margin;
+    clone.style.boxSizing = 'border-box';
+    clone.style.zIndex = '9999';
+    clone.style.pointerEvents = 'none';
+    clone.style.cursor = 'grabbing';
+    clone.style.transform = 'translateY(0)';
+    document.body.appendChild(clone);
+    return clone;
+  }
+
+  function finishPriorityDrag() {
+    if (!draggedPriorityItem) return;
+
+    var item = draggedPriorityItem;
+    var clone = draggedPriorityClone;
+
+    state.statPriority = priorityOrderFromDom();
+    save();
+    renderResults();
+
+    if (clone) clone.remove();
+    item.style.visibility = '';
+    item.style.pointerEvents = '';
+    item.classList.remove('dragging');
+
+    draggedPriority = null;
+    draggedPriorityItem = null;
+    draggedPriorityClone = null;
+    dragPointerId = null;
+  }
+
+  document.addEventListener('pointerdown', function (e) {
+    var item = e.target.closest ? e.target.closest('.priority-item') : null;
+    if (!item || e.button !== 0) return;
+
+    var list = $('priority-list');
+    if (!list || !list.contains(item)) return;
+
+    e.preventDefault();
+    draggedPriority = item.dataset.priority;
+    draggedPriorityItem = item;
+    dragPointerId = e.pointerId;
+
+    var rect = item.getBoundingClientRect();
+    dragOffsetY = e.clientY - rect.top;
+    dragCurrentY = e.clientY;
+
+    draggedPriorityClone = createPriorityDragClone(item);
+    item.classList.add('dragging');
+    item.style.visibility = 'hidden';
+    item.style.pointerEvents = 'none';
+
+    item.setPointerCapture?.(e.pointerId);
+  });
+
+  document.addEventListener('pointermove', function (e) {
+    if (!draggedPriorityItem || e.pointerId !== dragPointerId) return;
+    e.preventDefault();
+
+    var list = $('priority-list');
+    if (!list) return;
+
+    // Give the pointer some leeway beyond the list so the first and last
+    // slots are easy to reach. The dragged element may extend slightly
+    // outside the list while the pointer is in this leeway area.
+    var listRect = list.getBoundingClientRect();
+    var itemRect = draggedPriorityClone ? draggedPriorityClone.getBoundingClientRect() : draggedPriorityItem.getBoundingClientRect();
+    var minPointerY = listRect.top;
+    var maxPointerY = listRect.bottom;
+    var boundedPointerY = Math.max(minPointerY, Math.min(e.clientY, maxPointerY));
+    dragCurrentY = boundedPointerY;
+
+    if (draggedPriorityClone) {
+      draggedPriorityClone.style.top = (boundedPointerY - dragOffsetY) + 'px';
+    }
+
+    // Temporarily show the hidden item's original layout position while
+    // calculating the slot, without letting it participate visually.
+    var elements = Array.prototype.slice.call(list.querySelectorAll('.priority-item'))
+      .filter(function (x) { return x !== draggedPriorityItem; });
+
+    var target = null;
+    var before = true;
+
+    for (var i = 0; i < elements.length; i++) {
+      var rect = elements[i].getBoundingClientRect();
+      var midpoint = rect.top + rect.height / 2;
+      if (boundedPointerY < midpoint) {
+        target = elements[i];
+        before = true;
+        break;
+      }
+    }
+
+    if (!target && elements.length) {
+      target = elements[elements.length - 1];
+      before = false;
+    }
+
+    if (target) {
+      animatePriorityMove(draggedPriorityItem, target, before);
+      state.statPriority = priorityOrderFromDom();
+      draggedPriorityItem.style.visibility = 'hidden';
+    }
+  });
+
+  document.addEventListener('pointerup', function (e) {
+    if (!draggedPriorityItem || e.pointerId !== dragPointerId) return;
+    finishPriorityDrag();
+  });
+
+  document.addEventListener('pointercancel', function (e) {
+    if (!draggedPriorityItem || e.pointerId !== dragPointerId) return;
+    finishPriorityDrag();
+  });
 
   document.addEventListener('click', function (e) {
     var t = e.target.closest ? e.target.closest('[data-a]') : null;
